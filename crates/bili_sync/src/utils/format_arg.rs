@@ -399,6 +399,8 @@ mod tests {
             cid: None,
             created_at: "2024-01-01 00:00:00".to_string(),
             season_id: Some("12345".to_string()),
+            submission_membership_state: 0,
+            submission_membership_checked_at: None,
             ep_id: None,
             season_number: None,
             episode_number: None,

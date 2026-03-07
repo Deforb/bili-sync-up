@@ -275,30 +275,41 @@ impl VideoInfo {
                 ugc_season,
                 ..
             } => {
-                // 投稿里的 UGC 合集（ugc_season）用于后续目录分季与命名。
-                let (ugc_season_id, ugc_episode_number) = if let Some(ugc) = ugc_season.as_ref() {
-                    let season_id = ugc.id.as_ref().and_then(|raw_id| {
-                        raw_id
-                            .as_i64()
-                            .or_else(|| raw_id.as_str().and_then(|s| s.parse::<i64>().ok()))
-                            .filter(|id| *id > 0)
-                            .map(|id| id.to_string())
-                    });
+                // 投稿里的 UGC 合集（ugc_season）只有在合集归属确实属于当前 UP 时，
+                // 才能作为本地 season_id 使用。站内活动/专题页也会返回 ugc_season，
+                // 但它们不应被误判为当前 UP 自己的合集。
+                let (ugc_season_id_update, ugc_episode_number_update) = if let Some(ugc) = ugc_season.as_ref() {
+                    // 这里必须以当前即将写入数据库的目标UP为准，而不是接口返回的owner。
+                    // 对合作视频，owner 是原始投稿人，但视频最终可能归类到已订阅的 staff UP。
+                    // 若仍与 owner.mid 比较，会把“别人的合集”误归到当前订阅UP名下。
+                    let belongs_to_current_upper = ugc.mid == Some(base_model.upper_id);
+                    if belongs_to_current_upper {
+                        let season_id = ugc.id.as_ref().and_then(|raw_id| {
+                            raw_id
+                                .as_i64()
+                                .or_else(|| raw_id.as_str().and_then(|s| s.parse::<i64>().ok()))
+                                .filter(|id| *id > 0)
+                                .map(|id| id.to_string())
+                        });
 
-                    // 优先按 bvid 在 episodes 中的位置计算序号，失败时回退到 page.num
-                    let episode_by_bvid = ugc
-                        .episodes
-                        .iter()
-                        .position(|ep| ep.bvid.as_deref() == Some(bvid.as_str()))
-                        .and_then(|idx| i32::try_from(idx + 1).ok());
-                    let episode_by_page_num = ugc
-                        .episodes
-                        .iter()
-                        .find_map(|ep| ep.page.as_ref().and_then(|p| p.num))
-                        .filter(|n| *n > 0);
-                    let episode_number = episode_by_bvid.or(episode_by_page_num);
+                        // 优先按 bvid 在 episodes 中的位置计算序号，失败时回退到 page.num
+                        let episode_by_bvid = ugc
+                            .episodes
+                            .iter()
+                            .position(|ep| ep.bvid.as_deref() == Some(bvid.as_str()))
+                            .and_then(|idx| i32::try_from(idx + 1).ok());
+                        let episode_by_page_num = ugc
+                            .episodes
+                            .iter()
+                            .find_map(|ep| ep.page.as_ref().and_then(|p| p.num))
+                            .filter(|n| *n > 0);
+                        let episode_number = episode_by_bvid.or(episode_by_page_num);
 
-                    (season_id, episode_number)
+                        (Some(season_id), Some(episode_number))
+                    } else {
+                        // 显式清空旧的错误归属，避免历史误判残留在数据库里。
+                        (Some(None), Some(None))
+                    }
                 } else {
                     (None, None)
                 };
@@ -338,12 +349,12 @@ impl VideoInfo {
                     // 保存staff信息到数据库
                     staff_info: Set(staff.map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))),
                     // 投稿合集标识与集序（仅在ugc_season存在时更新）
-                    season_id: match ugc_season_id {
-                        Some(v) => Set(Some(v)),
+                    season_id: match ugc_season_id_update {
+                        Some(value) => Set(value),
                         None => NotSet,
                     },
-                    episode_number: match ugc_episode_number {
-                        Some(v) => Set(Some(v)),
+                    episode_number: match ugc_episode_number_update {
+                        Some(value) => Set(value),
                         None => NotSet,
                     },
                     // cid字段将在workflow.rs中从pages中提取并设置

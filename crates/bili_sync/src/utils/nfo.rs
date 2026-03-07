@@ -146,6 +146,7 @@ pub struct Season<'a> {
     pub media_id: Option<i64>,                     // 媒体ID
     pub plot_link_override: Option<String>,        // 覆盖plot中的链接地址
     pub uniqueid_override: Option<String>,         // 覆盖uniqueid内容
+    pub suppress_season_label_in_title: bool,      // 是否取消<title>中的“第X季”前缀
 }
 
 impl NFO<'_> {
@@ -1196,8 +1197,12 @@ impl NFO<'_> {
                 } else {
                     // 非番剧合集使用标准季度标题，避免媒体库把季当成单个视频
                     if let Some(ref set_name) = season.set {
-                        let season_label = Self::number_to_chinese(season.season_number.max(1));
-                        (format!("第{}季 {}", season_label, set_name), set_name.clone())
+                        if season.suppress_season_label_in_title {
+                            (set_name.clone(), set_name.clone())
+                        } else {
+                            let season_label = Self::number_to_chinese(season.season_number.max(1));
+                            (format!("第{}季 {}", season_label, set_name), set_name.clone())
+                        }
                     } else {
                         (season.name.to_string(), season.original_title.to_string())
                     }
@@ -2380,6 +2385,7 @@ impl<'a> From<&'a video::Model> for Season<'a> {
             media_id: None,  // 普通视频没有media_id
             plot_link_override: None,
             uniqueid_override: None,
+            suppress_season_label_in_title: false,
         }
     }
 }
@@ -2396,10 +2402,12 @@ impl<'a> Season<'a> {
         let safe_season = season_number.max(1);
 
         if let Some(name) = collection_name {
-            season.name = name;
-            season.original_title = name;
-            season.sorttitle = Some(format!("{} 第{:02}季", name, safe_season));
-            season.set = Some(name.to_string());
+            let normalized_name = name.trim_start_matches("合集·").trim();
+            let normalized_name = if normalized_name.is_empty() { name } else { normalized_name };
+            season.name = normalized_name;
+            season.original_title = normalized_name;
+            season.sorttitle = Some(format!("{} 第{:02}季", normalized_name, safe_season));
+            season.set = Some(normalized_name.to_string());
         }
 
         if let Some(cover) = collection_cover {
@@ -2504,6 +2512,7 @@ impl<'a> Season<'a> {
             media_id: season_info.media_id,
             plot_link_override: None,
             uniqueid_override: None,
+            suppress_season_label_in_title: false,
         }
     }
 }
@@ -3300,7 +3309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ugc_multi_page_season_title_uses_chinese_and_video_title() {
-        // UGC多P即使分类为动画(category=1)，也不应按番剧输出“第X季”纯标题
+        // UGC多P的 season.nfo title 应直接使用视频标题，不再附加“第X季”
         let video = video::Model {
             intro: "测试简介".to_string(),
             name: "BV标题占位".to_string(),
@@ -3323,11 +3332,66 @@ mod tests {
 
         let season_title = "【流木/合集】《新樱花大战》全剧情流程合集（樱/act/剧情/机战/萝卜/死神/恋爱/gal/情怀/经典/神作/治愈/末日/世嘉/久保带人）";
         let season = Season::from_video_with_collection(&video, Some(season_title), None, 10, Some(12));
+        let mut season = season;
+        season.suppress_season_label_in_title = true;
         let season_nfo = NFO::Season(season).generate_nfo().await.unwrap();
 
         assert!(
-            season_nfo.contains(&format!("<title>第十季 {}</title>", season_title)),
-            "UGC多P season.nfo 标题应为中文季数 + 视频标题"
+            season_nfo.contains(&format!("<title>{}</title>", season_title)),
+            "UGC多P season.nfo 标题不应再附加季度前缀"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ugc_collection_season_nfo_strips_collection_prefix() {
+        let video = video::Model {
+            intro: "测试简介".to_string(),
+            name: "BV标题占位".to_string(),
+            upper_id: 123456,
+            upper_name: "浅影阿_".to_string(),
+            category: 3,
+            season_number: Some(1),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap(),
+                chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap(),
+                chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            ),
+            bvid: "BV1PrefixTest01".to_string(),
+            ..Default::default()
+        };
+
+        let mut season = Season::from_video_with_collection(
+            &video,
+            Some("合集·童年动漫主题曲翻唱合集"),
+            None,
+            1,
+            Some(8),
+        );
+        season.suppress_season_label_in_title = true;
+        let season_nfo = NFO::Season(season).generate_nfo().await.unwrap();
+
+        assert!(
+            season_nfo.contains("<title>童年动漫主题曲翻唱合集</title>"),
+            "合集聚合 season.nfo title 不应包含季度前缀"
+        );
+        assert!(
+            season_nfo.contains("<originaltitle>童年动漫主题曲翻唱合集</originaltitle>"),
+            "season.nfo originaltitle 不应保留合集前缀"
+        );
+        assert!(
+            season_nfo.contains("<sorttitle>童年动漫主题曲翻唱合集 第01季</sorttitle>"),
+            "season.nfo sorttitle 不应保留合集前缀"
+        );
+        assert!(
+            season_nfo.contains("<name>童年动漫主题曲翻唱合集</name>"),
+            "season.nfo set/name 不应保留合集前缀"
+        );
+        assert!(
+            !season_nfo.contains("合集·童年动漫主题曲翻唱合集"),
+            "season.nfo 中不应再出现自动添加的合集前缀"
         );
     }
 

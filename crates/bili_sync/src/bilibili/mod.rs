@@ -114,6 +114,8 @@ pub struct UgcSeasonInfo {
     #[serde(default)]
     pub id: Option<serde_json::Value>,
     #[serde(default)]
+    pub mid: Option<i64>,
+    #[serde(default)]
     pub episodes: Vec<UgcSeasonEpisode>,
 }
 

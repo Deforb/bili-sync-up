@@ -600,13 +600,18 @@ impl BiliClient {
 
             // 添加重试机制获取当前页数据
             let seasons_response = loop {
+                let mid_str = mid.to_string();
+                let page_num_str = current_page.to_string();
+                let page_size_str = page_size.to_string();
+                let web_location = "333.1387".to_string();
                 match self
                     .request(Method::GET, seasons_url)
                     .await
                     .query(&[
-                        ("mid", &mid.to_string()),
-                        ("page_num", &current_page.to_string()),
-                        ("page_size", &page_size.to_string()),
+                        ("mid", &mid_str),
+                        ("page_num", &page_num_str),
+                        ("page_size", &page_size_str),
+                        ("web_location", &web_location),
                     ])
                     .send()
                     .await
@@ -839,6 +844,8 @@ impl BiliClient {
 
         let collection_count = all_collections.len();
         info!("UP主 {} 总共获取到 {} 个合集", mid, collection_count);
+
+        crate::utils::collection_aggregate::cache_user_collections(mid, &all_collections);
 
         Ok(crate::api::response::UserCollectionsResponse {
             success: true,

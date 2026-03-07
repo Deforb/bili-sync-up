@@ -4751,10 +4751,44 @@ pub async fn download_video_pages(
         Ok(ExecutionStatus::Skipped)
     };
 
-    // 额外的结果单独处理（季度NFO、季度图片、根目录Emby兼容封面、staff头像）
+    // UGC 的 Season 结构默认只有 Seasonxx-thumb/fanart。
+    // 这里补一个 Seasonxx-poster.jpg，直接复用横版 thumb，避免再发起重复下载请求。
+    let season_poster_compat_result = if !is_bangumi
+        && season_folder.is_some()
+        && video_base_name.starts_with("Season")
+        && (((!is_single_page && current_config.multi_page_use_season_structure))
+            || (is_collection && collection_use_season_structure))
+    {
+        let root_dir = base_path.parent().unwrap_or(&base_path);
+        let season_thumb_path = root_dir.join(format!("{}-thumb.jpg", video_base_name));
+        let season_poster_path = root_dir.join(format!("{}-poster.jpg", video_base_name));
+
+        let thumb_ready = std::fs::metadata(&season_thumb_path)
+            .map(|meta| meta.is_file() && meta.len() > 0)
+            .unwrap_or(false);
+        let poster_ready = std::fs::metadata(&season_poster_path)
+            .map(|meta| meta.is_file() && meta.len() > 0)
+            .unwrap_or(false);
+
+        if poster_ready && !separate_status[0] {
+            Ok(ExecutionStatus::Skipped)
+        } else if thumb_ready {
+            let _ = remove_zero_byte_file_if_exists(&season_poster_path, "季级poster生成前检查").await;
+            ensure_parent_dir_for_file(&season_poster_path).await?;
+            fs::copy(&season_thumb_path, &season_poster_path).await?;
+            Ok(ExecutionStatus::Succeeded)
+        } else {
+            Ok(ExecutionStatus::Skipped)
+        }
+    } else {
+        Ok(ExecutionStatus::Skipped)
+    };
+
+    // 额外的结果单独处理（季度NFO、季度图片、季度poster、根目录Emby兼容封面、staff头像）
     let extra_results = [
         Ok(season_nfo_result.unwrap_or(ExecutionStatus::Skipped)),
         Ok(season_images_result.unwrap_or(ExecutionStatus::Skipped)),
+        season_poster_compat_result, // UGC Seasonxx-poster.jpg（复用Seasonxx-thumb.jpg）
         res_2,              // 番剧/多P/合集根目录 poster.jpg 的结果（Emby兼容）
         res_folder,         // 番剧/多P/合集根目录 folder.jpg 的结果（Emby优先识别）
         staff_faces_result, // staff成员头像下载结果
@@ -4771,7 +4805,7 @@ pub async fn download_video_pages(
 
     all_results
         .iter()
-        .take(9)
+        .take(10)
         .zip([
             "封面",
             "详情",
@@ -4780,6 +4814,7 @@ pub async fn download_video_pages(
             "分页下载",
             "季度NFO",
             "季度图片",
+            "季度poster",
             "根目录poster",
             "根目录folder",
         ])

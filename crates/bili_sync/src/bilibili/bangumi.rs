@@ -283,6 +283,7 @@ impl Bangumi {
                 // 将发布时间戳转换为 DateTime<Utc>
                 let pub_time = DateTime::<Utc>::from_timestamp(pub_time_timestamp, 0)
                     .unwrap_or_else(Utc::now);
+                let duration = (_duration > 0).then_some((_duration / 1000) as i32);
 
                 // 增量获取：检查旧集数是否需要字段更新
                 if let Some(latest_time) = latest_row_at {
@@ -314,6 +315,7 @@ impl Bangumi {
                             cover: episode_cover,
                             intro: intro.clone(),
                             pubtime: pub_time,
+                            duration,
                             show_title: Some(show_title),
                             season_number,
                             episode_number,
@@ -357,6 +359,7 @@ impl Bangumi {
                     cover: episode_cover,
                     intro: intro.clone(),
                     pubtime: pub_time,
+                    duration,
                     show_title: Some(show_title),
                     season_number,
                     episode_number,
@@ -482,6 +485,7 @@ impl Bangumi {
                     // 将发布时间戳转换为 DateTime<Utc>
                     let pub_time = DateTime::<Utc>::from_timestamp(pub_time_timestamp, 0)
                         .unwrap_or_else(Utc::now);
+                    let duration = (_duration > 0).then_some((_duration / 1000) as i32);
 
                     // 增量获取：跳过早于latest_row_at的集数
                     if let Some(latest_time) = latest_row_at {
@@ -512,6 +516,7 @@ impl Bangumi {
                                 cover: episode_cover,
                                 intro: intro.clone(),
                                 pubtime: pub_time,
+                                duration,
                                 show_title: Some(show_title),
                                 season_number,
                                 episode_number,
@@ -556,6 +561,7 @@ impl Bangumi {
                         cover: episode_cover,
                         intro: intro.clone(),
                         pubtime: pub_time,
+                        duration,
                         show_title: Some(show_title),
                         season_number,
                         episode_number,
@@ -789,6 +795,7 @@ impl Bangumi {
                     // 将发布时间戳转换为 DateTime<Utc>
                     let pub_time = DateTime::<Utc>::from_timestamp(pub_time_timestamp, 0)
                         .unwrap_or_else(Utc::now);
+                    let duration = (_duration > 0).then_some((_duration / 1000) as i32);
 
                     // 增量获取：跳过早于latest_row_at的集数
                     if let Some(latest_time) = latest_row_at {
@@ -819,6 +826,7 @@ impl Bangumi {
                                 cover: episode_cover,
                                 intro: intro.clone(),
                                 pubtime: pub_time,
+                                duration,
                                 show_title: Some(show_title),
                                 season_number,
                                 episode_number,
@@ -863,6 +871,7 @@ impl Bangumi {
                         cover: episode_cover,
                         intro: intro.clone(),
                         pubtime: pub_time,
+                        duration,
                         show_title: Some(show_title),
                         season_number,
                         episode_number,

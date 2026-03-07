@@ -452,6 +452,14 @@ pub struct UpdateKeywordFiltersRequest {
     /// 是否区分大小写（默认为 true）
     #[serde(default = "default_case_sensitive")]
     pub case_sensitive: Option<bool>,
+    /// 最短时长（秒），视频时长小于该值时将被过滤
+    pub min_duration_seconds: Option<i32>,
+    /// 最长时长（秒），视频时长大于该值时将被过滤
+    pub max_duration_seconds: Option<i32>,
+    /// 投稿起始日期（YYYY-MM-DD，含当天）
+    pub published_after: Option<String>,
+    /// 投稿截止日期（YYYY-MM-DD，含当天）
+    pub published_before: Option<String>,
     /// 【已废弃】关键词列表（支持正则表达式）- 向后兼容
     #[serde(default)]
     pub keyword_filters: Option<Vec<String>>,

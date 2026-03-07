@@ -17,6 +17,7 @@ pub use favorite_list::FavoriteList;
 use favorite_list::Upper;
 use once_cell::sync::Lazy;
 pub use risk_control::{CaptchaInfo, CaptchaResult, GeetestInfo, RiskControl};
+use serde::{Deserialize, Deserializer};
 pub use submission::Submission;
 pub use verification_coordinator::{VerificationRequest, VERIFICATION_COORDINATOR};
 pub use video::{bvid_to_aid, Dimension, PageInfo, Video};
@@ -44,6 +45,41 @@ static MIXIN_KEY: Lazy<ArcSwapOption<String>> = Lazy::new(Default::default);
 
 pub(crate) fn set_global_mixin_key(key: String) {
     MIXIN_KEY.store(Some(Arc::new(key)));
+}
+
+fn parse_duration_to_seconds(raw: &str) -> Option<i32> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Ok(seconds) = normalized.parse::<i32>() {
+        return Some(seconds);
+    }
+
+    let parts: Vec<&str> = normalized.split(':').collect();
+    match parts.as_slice() {
+        [minutes, seconds] => Some(minutes.parse::<i32>().ok()? * 60 + seconds.parse::<i32>().ok()?),
+        [hours, minutes, seconds] => Some(
+            hours.parse::<i32>().ok()? * 3600
+                + minutes.parse::<i32>().ok()? * 60
+                + seconds.parse::<i32>().ok()?,
+        ),
+        _ => None,
+    }
+}
+
+fn deserialize_optional_duration_seconds<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| match raw {
+        serde_json::Value::Null => None,
+        serde_json::Value::Number(num) => num.as_i64().map(|v| v as i32),
+        serde_json::Value::String(text) => parse_duration_to_seconds(&text),
+        _ => None,
+    }))
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -120,6 +156,8 @@ pub enum VideoInfo {
         ctime: DateTime<Utc>,
         #[serde(rename = "pubdate", with = "ts_seconds")]
         pubtime: DateTime<Utc>,
+        #[serde(default, deserialize_with = "deserialize_optional_duration_seconds")]
+        duration: Option<i32>,
         pages: Vec<PageInfo>,
         state: i32,
         show_title: Option<String>,
@@ -150,6 +188,8 @@ pub enum VideoInfo {
         fav_time: DateTime<Utc>,
         #[serde(with = "ts_seconds")]
         pubtime: DateTime<Utc>,
+        #[serde(default, deserialize_with = "deserialize_optional_duration_seconds")]
+        duration: Option<i32>,
         attr: i32,
     },
     /// 从稍后再看接口获取的视频信息
@@ -168,6 +208,8 @@ pub enum VideoInfo {
         fav_time: DateTime<Utc>,
         #[serde(rename = "pubdate", with = "ts_seconds")]
         pubtime: DateTime<Utc>,
+        #[serde(default, deserialize_with = "deserialize_optional_duration_seconds")]
+        duration: Option<i32>,
         state: i32,
     },
     /// 从视频合集/视频列表接口获取的视频信息
@@ -181,6 +223,8 @@ pub enum VideoInfo {
         pubtime: DateTime<Utc>,
         /// 视频标题
         title: String,
+        #[serde(default, deserialize_with = "deserialize_optional_duration_seconds")]
+        duration: Option<i32>,
         /// UP主信息，从arc.author中提取
         #[serde(rename = "arc")]
         arc: Option<serde_json::Value>,
@@ -195,6 +239,8 @@ pub enum VideoInfo {
         cover: String,
         #[serde(rename = "created", with = "ts_seconds")]
         ctime: DateTime<Utc>,
+        #[serde(rename = "length", default, deserialize_with = "deserialize_optional_duration_seconds")]
+        duration: Option<i32>,
         /// 投稿列表接口中的合集/系列ID（存在时用于UP源合集识别）
         #[serde(default)]
         season_id: Option<serde_json::Value>,
@@ -209,6 +255,8 @@ pub enum VideoInfo {
         cover: String,
         #[serde(default)]
         pubtime: DateTime<Utc>,
+        #[serde(default, deserialize_with = "deserialize_optional_duration_seconds")]
+        duration: Option<i32>,
     },
     // 从番剧接口获取的视频信息
     Bangumi {
@@ -221,6 +269,7 @@ pub enum VideoInfo {
         intro: String,
         #[serde(with = "ts_seconds")]
         pubtime: DateTime<Utc>,
+        duration: Option<i32>,
         show_title: Option<String>,
         /// 季度编号，从seasons数组中的位置计算得出
         season_number: Option<i32>,

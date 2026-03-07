@@ -35,6 +35,10 @@ pub struct BangumiSource {
     pub blacklist_keywords: Option<String>,
     pub whitelist_keywords: Option<String>,
     pub keyword_case_sensitive: bool,
+    pub min_duration_seconds: Option<i32>,
+    pub max_duration_seconds: Option<i32>,
+    pub published_after: Option<String>,
+    pub published_before: Option<String>,
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
     pub flat_folder: bool,
@@ -230,6 +234,7 @@ impl BangumiSource {
                     season_id: season_id.clone().unwrap_or_default(),
                     intro: intro.clone(),
                     pubtime: pub_datetime.unwrap_or_default(),
+                    duration: (_duration > 0).then_some(_duration as i32),
                     episode_number,
                     share_copy,
                     show_season_type,
@@ -518,6 +523,22 @@ impl VideoSource for BangumiSource {
 
     fn get_keyword_case_sensitive(&self) -> bool {
         self.keyword_case_sensitive
+    }
+
+    fn get_min_duration_seconds(&self) -> Option<i32> {
+        self.min_duration_seconds
+    }
+
+    fn get_max_duration_seconds(&self) -> Option<i32> {
+        self.max_duration_seconds
+    }
+
+    fn get_published_after(&self) -> Option<String> {
+        self.published_after.clone()
+    }
+
+    fn get_published_before(&self) -> Option<String> {
+        self.published_before.clone()
     }
 
     fn audio_only(&self) -> bool {

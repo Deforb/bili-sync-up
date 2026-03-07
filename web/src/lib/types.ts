@@ -53,6 +53,10 @@ export interface VideoSource {
 	blacklist_keywords?: string[]; // 黑名单关键词列表（匹配的视频将被排除）
 	whitelist_keywords?: string[]; // 白名单关键词列表（只下载匹配的视频）
 	case_sensitive: boolean; // 是否区分大小写
+	min_duration_seconds?: number; // 最短时长（秒）
+	max_duration_seconds?: number; // 最长时长（秒）
+	published_after?: string; // 投稿起始日期（YYYY-MM-DD，含当天）
+	published_before?: string; // 投稿截止日期（YYYY-MM-DD，含当天）
 	// 向后兼容的旧字段
 	keyword_filters?: string[]; // 【已废弃】关键词过滤器列表（支持正则表达式）
 	keyword_filter_mode?: KeywordFilterMode; // 【已废弃】关键词过滤模式
@@ -741,6 +745,10 @@ export interface UpdateKeywordFiltersRequest {
 	blacklist_keywords?: string[]; // 黑名单关键词列表（匹配的视频将被排除）
 	whitelist_keywords?: string[]; // 白名单关键词列表（只下载匹配的视频）
 	case_sensitive?: boolean; // 是否区分大小写
+	min_duration_seconds?: number; // 最短时长（秒）
+	max_duration_seconds?: number; // 最长时长（秒）
+	published_after?: string; // 投稿起始日期（YYYY-MM-DD，含当天）
+	published_before?: string; // 投稿截止日期（YYYY-MM-DD，含当天）
 	// 向后兼容的旧字段
 	keyword_filters?: string[]; // 【已废弃】关键词过滤器列表
 	keyword_filter_mode?: KeywordFilterMode; // 【已废弃】关键词过滤模式
@@ -764,6 +772,10 @@ export interface GetKeywordFiltersResponse {
 	blacklist_keywords: string[]; // 黑名单关键词列表
 	whitelist_keywords: string[]; // 白名单关键词列表
 	case_sensitive: boolean; // 是否区分大小写
+	min_duration_seconds?: number; // 最短时长（秒）
+	max_duration_seconds?: number; // 最长时长（秒）
+	published_after?: string; // 投稿起始日期（YYYY-MM-DD，含当天）
+	published_before?: string; // 投稿截止日期（YYYY-MM-DD，含当天）
 	// 向后兼容的旧字段
 	keyword_filters: string[]; // 【已废弃】关键词过滤器列表
 	keyword_filter_mode?: string; // 【已废弃】关键词过滤模式

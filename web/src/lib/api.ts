@@ -475,14 +475,22 @@ class ApiClient {
 		id: number,
 		blacklistKeywords: string[],
 		whitelistKeywords: string[],
-		caseSensitive: boolean = true
+		caseSensitive: boolean = true,
+		minDurationSeconds?: number | null,
+		maxDurationSeconds?: number | null,
+		publishedAfter?: string,
+		publishedBefore?: string
 	): Promise<ApiResponse<UpdateKeywordFiltersResponse>> {
 		return this.put<UpdateKeywordFiltersResponse>(
 			`/video-sources/${sourceType}/${id}/keyword-filters`,
 			{
 				blacklist_keywords: blacklistKeywords,
 				whitelist_keywords: whitelistKeywords,
-				case_sensitive: caseSensitive
+				case_sensitive: caseSensitive,
+				min_duration_seconds: minDurationSeconds ?? undefined,
+				max_duration_seconds: maxDurationSeconds ?? undefined,
+				published_after: publishedAfter || undefined,
+				published_before: publishedBefore || undefined
 			}
 		);
 	}
@@ -1135,14 +1143,22 @@ export const api = {
 		id: number,
 		blacklistKeywords: string[],
 		whitelistKeywords: string[],
-		caseSensitive: boolean = true
+		caseSensitive: boolean = true,
+		minDurationSeconds?: number | null,
+		maxDurationSeconds?: number | null,
+		publishedAfter?: string,
+		publishedBefore?: string
 	) =>
 		apiClient.updateVideoSourceKeywordFilters(
 			sourceType,
 			id,
 			blacklistKeywords,
 			whitelistKeywords,
-			caseSensitive
+			caseSensitive,
+			minDurationSeconds,
+			maxDurationSeconds,
+			publishedAfter,
+			publishedBefore
 		),
 
 	/**

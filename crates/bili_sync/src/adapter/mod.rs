@@ -139,6 +139,26 @@ pub trait VideoSource {
         true // 默认实现：区分大小写
     }
 
+    /// 获取最短时长过滤（秒）
+    fn get_min_duration_seconds(&self) -> Option<i32> {
+        None
+    }
+
+    /// 获取最长时长过滤（秒）
+    fn get_max_duration_seconds(&self) -> Option<i32> {
+        None
+    }
+
+    /// 获取投稿起始日期过滤（YYYY-MM-DD，含当天）
+    fn get_published_after(&self) -> Option<String> {
+        None
+    }
+
+    /// 获取投稿截止日期过滤（YYYY-MM-DD，含当天）
+    fn get_published_before(&self) -> Option<String> {
+        None
+    }
+
     /// 获取是否仅下载音频（默认为 false）
     fn audio_only(&self) -> bool {
         false // 默认实现：下载视频
@@ -338,6 +358,10 @@ pub async fn bangumi_from<'a>(
             blacklist_keywords: model.blacklist_keywords,
             whitelist_keywords: model.whitelist_keywords,
             keyword_case_sensitive: model.keyword_case_sensitive,
+            min_duration_seconds: model.min_duration_seconds,
+            max_duration_seconds: model.max_duration_seconds,
+            published_after: model.published_after,
+            published_before: model.published_before,
             audio_only: model.audio_only,
             audio_only_m4a_only: model.audio_only_m4a_only,
             flat_folder: model.flat_folder,
@@ -378,6 +402,10 @@ pub async fn bangumi_from<'a>(
             blacklist_keywords: None,
             whitelist_keywords: None,
             keyword_case_sensitive: true,
+            min_duration_seconds: None,
+            max_duration_seconds: None,
+            published_after: None,
+            published_before: None,
             audio_only: false,
             audio_only_m4a_only: false,
             flat_folder: false,

@@ -10,21 +10,38 @@
 	export let initialBlacklistKeywords: string[] = [];
 	export let initialWhitelistKeywords: string[] = [];
 	export let initialCaseSensitive: boolean = true;
+	export let initialMinDurationSeconds: number | null = null;
+	export let initialMaxDurationSeconds: number | null = null;
+	export let initialPublishedAfter = '';
+	export let initialPublishedBefore = '';
 
 	const dispatch = createEventDispatcher<{
-		save: { blacklistKeywords: string[]; whitelistKeywords: string[]; caseSensitive: boolean };
+		save: {
+			blacklistKeywords: string[];
+			whitelistKeywords: string[];
+			caseSensitive: boolean;
+			minDurationSeconds: number | null;
+			maxDurationSeconds: number | null;
+			publishedAfter: string;
+			publishedBefore: string;
+		};
 		cancel: void;
 	}>();
 
 	let blacklistKeywords: string[] = [];
 	let whitelistKeywords: string[] = [];
 	let caseSensitive: boolean = true;
+	let minDurationSeconds = '';
+	let maxDurationSeconds = '';
+	let publishedAfter = '';
+	let publishedBefore = '';
 	let newBlacklistKeyword = '';
 	let newWhitelistKeyword = '';
 	let isLoading = false;
 	let isSaving = false;
 	let blacklistValidationError = '';
 	let whitelistValidationError = '';
+	let advancedValidationError = '';
 
 	// 当前选中的标签页：'whitelist' 或 'blacklist'
 	let activeTab: 'whitelist' | 'blacklist' = 'whitelist';
@@ -34,10 +51,17 @@
 		blacklistKeywords = [...initialBlacklistKeywords];
 		whitelistKeywords = [...initialWhitelistKeywords];
 		caseSensitive = initialCaseSensitive;
+		minDurationSeconds =
+			initialMinDurationSeconds !== null ? String(initialMinDurationSeconds) : '';
+		maxDurationSeconds =
+			initialMaxDurationSeconds !== null ? String(initialMaxDurationSeconds) : '';
+		publishedAfter = initialPublishedAfter;
+		publishedBefore = initialPublishedBefore;
 		newBlacklistKeyword = '';
 		newWhitelistKeyword = '';
 		blacklistValidationError = '';
 		whitelistValidationError = '';
+		advancedValidationError = '';
 		isLoading = false;
 		isSaving = false;
 		activeTab = 'whitelist';
@@ -60,6 +84,16 @@
 				blacklistKeywords = response.data.blacklist_keywords || [];
 				whitelistKeywords = response.data.whitelist_keywords || [];
 				caseSensitive = response.data.case_sensitive ?? true;
+				minDurationSeconds =
+					response.data.min_duration_seconds !== undefined
+						? String(response.data.min_duration_seconds)
+						: '';
+				maxDurationSeconds =
+					response.data.max_duration_seconds !== undefined
+						? String(response.data.max_duration_seconds)
+						: '';
+				publishedAfter = response.data.published_after || '';
+				publishedBefore = response.data.published_before || '';
 			}
 		} catch (error) {
 			console.error('加载关键词失败:', error);
@@ -108,6 +142,19 @@
 			return '该关键词已存在于黑名单中，同一关键词不能同时出现在黑名单和白名单';
 		}
 		return null;
+	}
+
+	function parseDurationInput(value: string, fieldName: string): number | null {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return null;
+		}
+
+		if (!/^\d+$/.test(trimmed)) {
+			throw new Error(`${fieldName}必须为非负整数秒数`);
+		}
+
+		return Number(trimmed);
 	}
 
 	// 添加黑名单关键词
@@ -186,6 +233,28 @@
 
 	// 保存关键词
 	async function handleSave() {
+		advancedValidationError = '';
+
+		let minDuration: number | null = null;
+		let maxDuration: number | null = null;
+		try {
+			minDuration = parseDurationInput(minDurationSeconds, '最短时长');
+			maxDuration = parseDurationInput(maxDurationSeconds, '最长时长');
+		} catch (error) {
+			advancedValidationError = (error as Error).message;
+			return;
+		}
+
+		if (minDuration !== null && maxDuration !== null && minDuration > maxDuration) {
+			advancedValidationError = '最短时长不能大于最长时长';
+			return;
+		}
+
+		if (publishedAfter && publishedBefore && publishedAfter > publishedBefore) {
+			advancedValidationError = '投稿起始日期不能晚于投稿截止日期';
+			return;
+		}
+
 		isSaving = true;
 		try {
 			const response = await api.updateVideoSourceKeywordFilters(
@@ -193,10 +262,22 @@
 				sourceId,
 				blacklistKeywords,
 				whitelistKeywords,
-				caseSensitive
+				caseSensitive,
+				minDuration,
+				maxDuration,
+				publishedAfter,
+				publishedBefore
 			);
 			if (response.status_code === 200) {
-				dispatch('save', { blacklistKeywords, whitelistKeywords, caseSensitive });
+				dispatch('save', {
+					blacklistKeywords,
+					whitelistKeywords,
+					caseSensitive,
+					minDurationSeconds: minDuration,
+					maxDurationSeconds: maxDuration,
+					publishedAfter,
+					publishedBefore
+				});
 				isOpen = false;
 			} else {
 				blacklistValidationError = '保存失败';
@@ -313,6 +394,78 @@
 						? '启用：ABC 和 abc 被视为不同的关键词'
 						: '禁用：ABC 和 abc 被视为相同的关键词'}
 				</p>
+
+				<div
+					class="rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950"
+				>
+					<p class="text-sm font-medium text-amber-800 dark:text-amber-200">附加过滤条件</p>
+					<div class="mt-3 grid gap-3 md:grid-cols-2">
+						<div class="space-y-1">
+							<label
+								for="keyword-filter-min-duration"
+								class="text-xs font-medium text-gray-700 dark:text-gray-300">最短时长（秒）</label
+							>
+							<input
+								id="keyword-filter-min-duration"
+								type="number"
+								min="0"
+								step="1"
+								bind:value={minDurationSeconds}
+								disabled={isSaving}
+								placeholder="例如 60"
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+							/>
+						</div>
+						<div class="space-y-1">
+							<label
+								for="keyword-filter-max-duration"
+								class="text-xs font-medium text-gray-700 dark:text-gray-300">最长时长（秒）</label
+							>
+							<input
+								id="keyword-filter-max-duration"
+								type="number"
+								min="0"
+								step="1"
+								bind:value={maxDurationSeconds}
+								disabled={isSaving}
+								placeholder="例如 1800"
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+							/>
+						</div>
+						<div class="space-y-1">
+							<label
+								for="keyword-filter-published-after"
+								class="text-xs font-medium text-gray-700 dark:text-gray-300">投稿起始日期</label
+							>
+							<input
+								id="keyword-filter-published-after"
+								type="date"
+								bind:value={publishedAfter}
+								disabled={isSaving}
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+							/>
+						</div>
+						<div class="space-y-1">
+							<label
+								for="keyword-filter-published-before"
+								class="text-xs font-medium text-gray-700 dark:text-gray-300">投稿截止日期</label
+							>
+							<input
+								id="keyword-filter-published-before"
+								type="date"
+								bind:value={publishedBefore}
+								disabled={isSaving}
+								class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-amber-500 dark:border-gray-600 dark:bg-gray-900"
+							/>
+						</div>
+					</div>
+					<p class="mt-2 text-xs text-amber-700 dark:text-amber-300">
+						留空表示不限制。投稿时间按自然日过滤，起止日期均包含当天。
+					</p>
+					{#if advancedValidationError}
+						<p class="mt-2 text-xs text-red-500">{advancedValidationError}</p>
+					{/if}
+				</div>
 
 				{#if isLoading}
 					<div class="flex items-center justify-center py-8">

@@ -671,6 +671,18 @@
 		showKeywordFilterDialog = true;
 	}
 
+	function hasSourceKeywordFilters(source: VideoSource) {
+		return (
+			(source.keyword_filters?.length ?? 0) > 0 ||
+			(source.blacklist_keywords?.length ?? 0) > 0 ||
+			(source.whitelist_keywords?.length ?? 0) > 0 ||
+			source.min_duration_seconds !== undefined ||
+			source.max_duration_seconds !== undefined ||
+			!!source.published_after ||
+			!!source.published_before
+		);
+	}
+
 	// 关键词保存成功
 	function handleKeywordFilterSave() {
 		toast.success('关键词过滤器已更新');
@@ -1055,8 +1067,7 @@
 													class="h-8 w-8 p-0"
 												>
 													<FilterIcon
-														class="h-4 w-4 {source.keyword_filters &&
-														source.keyword_filters.length > 0
+														class="h-4 w-4 {hasSourceKeywordFilters(source)
 															? 'text-purple-600'
 															: 'text-gray-400'}"
 													/>

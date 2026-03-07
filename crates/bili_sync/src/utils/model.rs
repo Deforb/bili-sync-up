@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use bili_sync_entity::*;
+use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::DatabaseTransaction;
@@ -33,6 +34,42 @@ fn extract_title(video_info: &VideoInfo) -> String {
         VideoInfo::WatchLater { title, .. } => title.clone(),
         VideoInfo::Collection { title, .. } => title.clone(),
         VideoInfo::Bangumi { title, .. } => title.clone(),
+    }
+}
+
+/// 从 VideoInfo 中提取发布时间
+fn extract_pubtime(video_info: &VideoInfo) -> DateTime<Utc> {
+    match video_info {
+        VideoInfo::Submission { ctime, .. } => *ctime,
+        VideoInfo::Dynamic { pubtime, .. } => *pubtime,
+        VideoInfo::Detail { pubtime, .. } => *pubtime,
+        VideoInfo::Favorite { pubtime, .. } => *pubtime,
+        VideoInfo::WatchLater { pubtime, .. } => *pubtime,
+        VideoInfo::Collection { pubtime, .. } => *pubtime,
+        VideoInfo::Bangumi { pubtime, .. } => *pubtime,
+    }
+}
+
+/// 从 VideoInfo 中提取时长（秒）
+fn extract_duration_seconds(video_info: &VideoInfo) -> Option<i32> {
+    match video_info {
+        VideoInfo::Submission { duration, .. } => *duration,
+        VideoInfo::Dynamic { duration, .. } => *duration,
+        VideoInfo::Detail { duration, .. } => *duration,
+        VideoInfo::Favorite { duration, .. } => *duration,
+        VideoInfo::WatchLater { duration, .. } => *duration,
+        VideoInfo::Collection { duration, arc, .. } => duration.or_else(|| {
+            arc.as_ref().and_then(|arc| {
+                arc.get("duration")
+                    .and_then(|value| value.as_i64().map(|v| v as i32))
+                    .or_else(|| {
+                        arc.get("arc")
+                            .and_then(|nested| nested.get("duration"))
+                            .and_then(|value| value.as_i64().map(|v| v as i32))
+                    })
+            })
+        }),
+        VideoInfo::Bangumi { duration, .. } => *duration,
     }
 }
 
@@ -222,6 +259,10 @@ pub async fn create_videos(
     let blacklist_keywords = video_source.get_blacklist_keywords();
     let whitelist_keywords = video_source.get_whitelist_keywords();
     let case_sensitive = video_source.get_keyword_case_sensitive();
+    let min_duration_seconds = video_source.get_min_duration_seconds();
+    let max_duration_seconds = video_source.get_max_duration_seconds();
+    let published_after = video_source.get_published_after();
+    let published_before = video_source.get_published_before();
     // 向后兼容：旧的单列表模式
     let keyword_filters = video_source.get_keyword_filters();
     let keyword_filter_mode = video_source.get_keyword_filter_mode();
@@ -229,8 +270,10 @@ pub async fn create_videos(
     // 判断是否有任何过滤配置
     let has_dual_list = blacklist_keywords.is_some() || whitelist_keywords.is_some();
     let has_legacy = keyword_filters.is_some();
+    let has_duration_filter = min_duration_seconds.is_some() || max_duration_seconds.is_some();
+    let has_published_filter = published_after.is_some() || published_before.is_some();
 
-    let final_videos_info = if has_dual_list || has_legacy {
+    let final_videos_info = if has_dual_list || has_legacy || has_duration_filter || has_published_filter {
         use crate::utils::keyword_filter::{should_filter_video_dual_list, should_filter_video_with_mode};
 
         let before_count = final_videos_info.len();
@@ -238,17 +281,56 @@ pub async fn create_videos(
             .into_iter()
             .filter(|info| {
                 let title = extract_title(info);
+                let bvid = extract_bvid(info);
 
                 // 优先使用新的双列表模式
-                let should_filter = if has_dual_list {
+                let mut should_filter = if has_dual_list {
                     should_filter_video_dual_list(&title, &blacklist_keywords, &whitelist_keywords, case_sensitive)
                 } else {
                     // 向后兼容：使用旧的单列表模式
                     should_filter_video_with_mode(&title, &keyword_filters, &keyword_filter_mode)
                 };
 
-                if should_filter {
-                    info!("视频 '{}' 被关键词过滤器过滤，跳过: {}", title, extract_bvid(info));
+                if !should_filter && has_duration_filter {
+                    let duration_seconds = extract_duration_seconds(info);
+                    if let Some(duration_seconds) = duration_seconds {
+                        if min_duration_seconds.map(|min| duration_seconds < min).unwrap_or(false)
+                            || max_duration_seconds.map(|max| duration_seconds > max).unwrap_or(false)
+                        {
+                            info!(
+                                "视频 '{}' 时长 {} 秒不在过滤范围内，跳过: {}",
+                                title, duration_seconds, bvid
+                            );
+                            should_filter = true;
+                        }
+                    }
+                }
+
+                if !should_filter && has_published_filter {
+                    let beijing_tz = crate::utils::time_format::beijing_timezone();
+                    let published_date = extract_pubtime(info)
+                        .with_timezone(&beijing_tz)
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    if published_after
+                        .as_ref()
+                        .map(|start| published_date < *start)
+                        .unwrap_or(false)
+                        || published_before
+                            .as_ref()
+                            .map(|end| published_date > *end)
+                            .unwrap_or(false)
+                    {
+                        info!(
+                            "视频 '{}' 投稿日期 {} 不在过滤范围内，跳过: {}",
+                            title, published_date, bvid
+                        );
+                        should_filter = true;
+                    }
+                }
+
+                if should_filter && (has_dual_list || has_legacy) {
+                    info!("视频 '{}' 被关键词过滤器过滤，跳过: {}", title, bvid);
                 }
                 !should_filter
             })
@@ -257,7 +339,7 @@ pub async fn create_videos(
         let filtered_count = before_count - filtered_videos.len();
         if filtered_count > 0 {
             info!(
-                "关键词过滤完成：原视频 {} 个，过滤 {} 个，剩余 {} 个",
+                "视频过滤完成：原视频 {} 个，过滤 {} 个，剩余 {} 个",
                 before_count,
                 filtered_count,
                 filtered_videos.len()

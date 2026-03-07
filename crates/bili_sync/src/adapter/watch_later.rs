@@ -103,6 +103,22 @@ impl VideoSource for watch_later::Model {
         self.keyword_case_sensitive
     }
 
+    fn get_min_duration_seconds(&self) -> Option<i32> {
+        self.min_duration_seconds
+    }
+
+    fn get_max_duration_seconds(&self) -> Option<i32> {
+        self.max_duration_seconds
+    }
+
+    fn get_published_after(&self) -> Option<String> {
+        self.published_after.clone()
+    }
+
+    fn get_published_before(&self) -> Option<String> {
+        self.published_before.clone()
+    }
+
     fn audio_only(&self) -> bool {
         self.audio_only
     }

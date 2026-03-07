@@ -809,6 +809,10 @@ pub async fn get_video_sources(
                 blacklist_keywords,
                 whitelist_keywords,
                 case_sensitive: model.keyword_case_sensitive,
+                min_duration_seconds: model.min_duration_seconds,
+                max_duration_seconds: model.max_duration_seconds,
+                published_after: model.published_after,
+                published_before: model.published_before,
                 keyword_filters,
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
@@ -862,6 +866,10 @@ pub async fn get_video_sources(
                 blacklist_keywords,
                 whitelist_keywords,
                 case_sensitive: model.keyword_case_sensitive,
+                min_duration_seconds: model.min_duration_seconds,
+                max_duration_seconds: model.max_duration_seconds,
+                published_after: model.published_after,
+                published_before: model.published_before,
                 keyword_filters,
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
@@ -915,6 +923,10 @@ pub async fn get_video_sources(
                 blacklist_keywords,
                 whitelist_keywords,
                 case_sensitive: model.keyword_case_sensitive,
+                min_duration_seconds: model.min_duration_seconds,
+                max_duration_seconds: model.max_duration_seconds,
+                published_after: model.published_after,
+                published_before: model.published_before,
                 keyword_filters,
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
@@ -968,6 +980,10 @@ pub async fn get_video_sources(
                 blacklist_keywords,
                 whitelist_keywords,
                 case_sensitive: model.keyword_case_sensitive,
+                min_duration_seconds: model.min_duration_seconds,
+                max_duration_seconds: model.max_duration_seconds,
+                published_after: model.published_after,
+                published_before: model.published_before,
                 keyword_filters,
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
@@ -1040,6 +1056,10 @@ pub async fn get_video_sources(
                 blacklist_keywords,
                 whitelist_keywords,
                 case_sensitive: model.keyword_case_sensitive,
+                min_duration_seconds: model.min_duration_seconds,
+                max_duration_seconds: model.max_duration_seconds,
+                published_after: model.published_after,
+                published_before: model.published_before,
                 keyword_filters,
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
@@ -2704,6 +2724,10 @@ pub async fn add_video_source_internal(
                 blacklist_keywords: sea_orm::Set(None),
                 whitelist_keywords: sea_orm::Set(None),
                 keyword_case_sensitive: sea_orm::Set(true),
+                min_duration_seconds: sea_orm::Set(None),
+                max_duration_seconds: sea_orm::Set(None),
+                published_after: sea_orm::Set(None),
+                published_before: sea_orm::Set(None),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
@@ -2774,6 +2798,10 @@ pub async fn add_video_source_internal(
                 blacklist_keywords: sea_orm::Set(None),
                 whitelist_keywords: sea_orm::Set(None),
                 keyword_case_sensitive: sea_orm::Set(true),
+                min_duration_seconds: sea_orm::Set(None),
+                max_duration_seconds: sea_orm::Set(None),
+                published_after: sea_orm::Set(None),
+                published_before: sea_orm::Set(None),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
                 flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
@@ -2852,6 +2880,10 @@ pub async fn add_video_source_internal(
                 blacklist_keywords: sea_orm::Set(None),
                 whitelist_keywords: sea_orm::Set(None),
                 keyword_case_sensitive: sea_orm::Set(true),
+                min_duration_seconds: sea_orm::Set(None),
+                max_duration_seconds: sea_orm::Set(None),
+                published_after: sea_orm::Set(None),
+                published_before: sea_orm::Set(None),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
@@ -3241,6 +3273,10 @@ pub async fn add_video_source_internal(
                 blacklist_keywords: sea_orm::Set(None),
                 whitelist_keywords: sea_orm::Set(None),
                 keyword_case_sensitive: sea_orm::Set(true),
+                min_duration_seconds: sea_orm::Set(None),
+                max_duration_seconds: sea_orm::Set(None),
+                published_after: sea_orm::Set(None),
+                published_before: sea_orm::Set(None),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
@@ -5411,6 +5447,7 @@ async fn fetch_submission_video_info_by_bvid(
             cover,
             upper,
             ctime,
+            duration,
             ugc_season,
             ..
         } => Ok((
@@ -5420,6 +5457,7 @@ async fn fetch_submission_video_info_by_bvid(
                 intro,
                 cover,
                 ctime,
+                duration,
                 season_id: ugc_season.and_then(|season| season.id),
             },
             upper.mid,
@@ -14623,6 +14661,7 @@ pub async fn update_video_source_keyword_filters(
     axum::Json(params): axum::Json<crate::api::request::UpdateKeywordFiltersRequest>,
 ) -> Result<ApiResponse<crate::api::response::UpdateKeywordFiltersResponse>, ApiError> {
     use crate::utils::keyword_filter::validate_regex;
+    use chrono::NaiveDate;
 
     // 验证黑名单正则表达式
     if let Some(ref blacklist) = params.blacklist_keywords {
@@ -14648,6 +14687,51 @@ pub async fn update_video_source_keyword_filters(
             if let Err(e) = validate_regex(pattern) {
                 return Err(anyhow!("正则表达式验证失败: {} - {}", pattern, e).into());
             }
+        }
+    }
+
+    if let Some(min_duration_seconds) = params.min_duration_seconds {
+        if min_duration_seconds < 0 {
+            return Err(anyhow!("最短时长不能小于 0 秒").into());
+        }
+    }
+    if let Some(max_duration_seconds) = params.max_duration_seconds {
+        if max_duration_seconds < 0 {
+            return Err(anyhow!("最长时长不能小于 0 秒").into());
+        }
+    }
+    if let (Some(min_duration_seconds), Some(max_duration_seconds)) =
+        (params.min_duration_seconds, params.max_duration_seconds)
+    {
+        if min_duration_seconds > max_duration_seconds {
+            return Err(anyhow!("最短时长不能大于最长时长").into());
+        }
+    }
+
+    let published_after = params
+        .published_after
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let published_before = params
+        .published_before
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let Some(ref date) = published_after {
+        NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
+    }
+    if let Some(ref date) = published_before {
+        NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
+    }
+    if let (Some(ref start), Some(ref end)) = (published_after.as_ref(), published_before.as_ref()) {
+        if start > end {
+            return Err(anyhow!("投稿起始日期不能晚于投稿截止日期").into());
         }
     }
 
@@ -14680,6 +14764,8 @@ pub async fn update_video_source_keyword_filters(
 
     // 处理大小写敏感设置
     let case_sensitive = params.case_sensitive.unwrap_or(true);
+    let min_duration_seconds = params.min_duration_seconds;
+    let max_duration_seconds = params.max_duration_seconds;
 
     let mut result = match source_type.as_str() {
         "collection" => {
@@ -14695,6 +14781,10 @@ pub async fn update_video_source_keyword_filters(
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode.clone()),
                 keyword_case_sensitive: sea_orm::Set(case_sensitive),
+                min_duration_seconds: sea_orm::Set(min_duration_seconds),
+                max_duration_seconds: sea_orm::Set(max_duration_seconds),
+                published_after: sea_orm::Set(published_after.clone()),
+                published_before: sea_orm::Set(published_before.clone()),
                 ..Default::default()
             })
             .exec(&txn)
@@ -14725,6 +14815,10 @@ pub async fn update_video_source_keyword_filters(
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode.clone()),
                 keyword_case_sensitive: sea_orm::Set(case_sensitive),
+                min_duration_seconds: sea_orm::Set(min_duration_seconds),
+                max_duration_seconds: sea_orm::Set(max_duration_seconds),
+                published_after: sea_orm::Set(published_after.clone()),
+                published_before: sea_orm::Set(published_before.clone()),
                 ..Default::default()
             })
             .exec(&txn)
@@ -14764,7 +14858,11 @@ pub async fn update_video_source_keyword_filters(
                 || record.whitelist_keywords != whitelist_json
                 || record.keyword_filters != keyword_filters_json
                 || record.keyword_filter_mode != keyword_filter_mode
-                || record.keyword_case_sensitive != case_sensitive;
+                || record.keyword_case_sensitive != case_sensitive
+                || record.min_duration_seconds != min_duration_seconds
+                || record.max_duration_seconds != max_duration_seconds
+                || record.published_after != published_after
+                || record.published_before != published_before;
 
             let mut update_model = submission::ActiveModel {
                 id: sea_orm::ActiveValue::Unchanged(id),
@@ -14773,6 +14871,10 @@ pub async fn update_video_source_keyword_filters(
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode.clone()),
                 keyword_case_sensitive: sea_orm::Set(case_sensitive),
+                min_duration_seconds: sea_orm::Set(min_duration_seconds),
+                max_duration_seconds: sea_orm::Set(max_duration_seconds),
+                published_after: sea_orm::Set(published_after.clone()),
+                published_before: sea_orm::Set(published_before.clone()),
                 ..Default::default()
             };
 
@@ -14837,6 +14939,10 @@ pub async fn update_video_source_keyword_filters(
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode.clone()),
                 keyword_case_sensitive: sea_orm::Set(case_sensitive),
+                min_duration_seconds: sea_orm::Set(min_duration_seconds),
+                max_duration_seconds: sea_orm::Set(max_duration_seconds),
+                published_after: sea_orm::Set(published_after.clone()),
+                published_before: sea_orm::Set(published_before.clone()),
                 ..Default::default()
             })
             .exec(&txn)
@@ -14867,6 +14973,10 @@ pub async fn update_video_source_keyword_filters(
                 keyword_filters: sea_orm::Set(keyword_filters_json),
                 keyword_filter_mode: sea_orm::Set(keyword_filter_mode.clone()),
                 keyword_case_sensitive: sea_orm::Set(case_sensitive),
+                min_duration_seconds: sea_orm::Set(min_duration_seconds),
+                max_duration_seconds: sea_orm::Set(max_duration_seconds),
+                published_after: sea_orm::Set(published_after.clone()),
+                published_before: sea_orm::Set(published_before.clone()),
                 ..Default::default()
             })
             .exec(&txn)
@@ -14972,6 +15082,10 @@ pub async fn get_video_source_keyword_filters(
         blacklist: Vec<String>,
         whitelist: Vec<String>,
         case_sensitive: bool,
+        min_duration_seconds: Option<i32>,
+        max_duration_seconds: Option<i32>,
+        published_after: Option<String>,
+        published_before: Option<String>,
         legacy_filters: Vec<String>,
         legacy_mode: Option<String>,
     }
@@ -14995,6 +15109,10 @@ pub async fn get_video_source_keyword_filters(
                     .and_then(|json_str| serde_json::from_str(json_str).ok())
                     .unwrap_or_default(),
                 case_sensitive: record.keyword_case_sensitive,
+                min_duration_seconds: record.min_duration_seconds,
+                max_duration_seconds: record.max_duration_seconds,
+                published_after: record.published_after,
+                published_before: record.published_before,
                 legacy_filters: record
                     .keyword_filters
                     .as_ref()
@@ -15021,6 +15139,10 @@ pub async fn get_video_source_keyword_filters(
                     .and_then(|json_str| serde_json::from_str(json_str).ok())
                     .unwrap_or_default(),
                 case_sensitive: record.keyword_case_sensitive,
+                min_duration_seconds: record.min_duration_seconds,
+                max_duration_seconds: record.max_duration_seconds,
+                published_after: record.published_after,
+                published_before: record.published_before,
                 legacy_filters: record
                     .keyword_filters
                     .as_ref()
@@ -15047,6 +15169,10 @@ pub async fn get_video_source_keyword_filters(
                     .and_then(|json_str| serde_json::from_str(json_str).ok())
                     .unwrap_or_default(),
                 case_sensitive: record.keyword_case_sensitive,
+                min_duration_seconds: record.min_duration_seconds,
+                max_duration_seconds: record.max_duration_seconds,
+                published_after: record.published_after,
+                published_before: record.published_before,
                 legacy_filters: record
                     .keyword_filters
                     .as_ref()
@@ -15073,6 +15199,10 @@ pub async fn get_video_source_keyword_filters(
                     .and_then(|json_str| serde_json::from_str(json_str).ok())
                     .unwrap_or_default(),
                 case_sensitive: record.keyword_case_sensitive,
+                min_duration_seconds: record.min_duration_seconds,
+                max_duration_seconds: record.max_duration_seconds,
+                published_after: record.published_after,
+                published_before: record.published_before,
                 legacy_filters: record
                     .keyword_filters
                     .as_ref()
@@ -15099,6 +15229,10 @@ pub async fn get_video_source_keyword_filters(
                     .and_then(|json_str| serde_json::from_str(json_str).ok())
                     .unwrap_or_default(),
                 case_sensitive: record.keyword_case_sensitive,
+                min_duration_seconds: record.min_duration_seconds,
+                max_duration_seconds: record.max_duration_seconds,
+                published_after: record.published_after,
+                published_before: record.published_before,
                 legacy_filters: record
                     .keyword_filters
                     .as_ref()
@@ -15117,6 +15251,10 @@ pub async fn get_video_source_keyword_filters(
         blacklist_keywords: filter_info.blacklist,
         whitelist_keywords: filter_info.whitelist,
         case_sensitive: filter_info.case_sensitive,
+        min_duration_seconds: filter_info.min_duration_seconds,
+        max_duration_seconds: filter_info.max_duration_seconds,
+        published_after: filter_info.published_after,
+        published_before: filter_info.published_before,
         keyword_filters: filter_info.legacy_filters,
         keyword_filter_mode: filter_info.legacy_mode,
     }))

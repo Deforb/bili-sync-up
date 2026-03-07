@@ -37,6 +37,7 @@ impl VideoInfo {
                 pubtime,
                 title,
                 arc,
+                ..
             } => {
                 // 从arc中提取upper信息
                 let (upper_id, upper_name, upper_face) = if let Some(arc_val) = arc {
@@ -76,6 +77,7 @@ impl VideoInfo {
                 fav_time,
                 pubtime,
                 attr,
+                ..
             } => bili_sync_entity::video::ActiveModel {
                 bvid: Set(bvid),
                 name: Set(title),
@@ -109,6 +111,7 @@ impl VideoInfo {
                 fav_time,
                 pubtime,
                 state,
+                ..
             } => bili_sync_entity::video::ActiveModel {
                 bvid: Set(bvid),
                 name: Set(title),
@@ -139,6 +142,7 @@ impl VideoInfo {
                 cover,
                 ctime,
                 season_id,
+                ..
             } => bili_sync_entity::video::ActiveModel {
                 bvid: Set(bvid),
                 name: Set(title),
@@ -162,6 +166,7 @@ impl VideoInfo {
                 intro,
                 cover,
                 pubtime,
+                ..
             } => bili_sync_entity::video::ActiveModel {
                 bvid: Set(bvid),
                 name: Set(title),

@@ -132,10 +132,15 @@
 	let blacklistKeywords: string[] = [];
 	let whitelistKeywords: string[] = [];
 	let keywordCaseSensitive = true; // 是否区分大小写
+	let minDurationSeconds = '';
+	let maxDurationSeconds = '';
+	let publishedAfter = '';
+	let publishedBefore = '';
 	let newBlacklistKeyword = '';
 	let newWhitelistKeyword = '';
 	let blacklistValidationError = '';
 	let whitelistValidationError = '';
+	let advancedFilterValidationError = '';
 	let validatingBlacklistKeyword = false;
 	let validatingWhitelistKeyword = false;
 	let showKeywordSection = false; // 是否展开关键词过滤器部分
@@ -556,6 +561,38 @@
 		whitelistKeywords = whitelistKeywords.filter((_, i) => i !== index);
 	}
 
+	function parseDurationInput(value: string, fieldName: string): number | null {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return null;
+		}
+		if (!/^\d+$/.test(trimmed)) {
+			throw new Error(`${fieldName}必须为非负整数秒数`);
+		}
+		return Number(trimmed);
+	}
+
+	function hasAdvancedFilters() {
+		return (
+			blacklistKeywords.length > 0 ||
+			whitelistKeywords.length > 0 ||
+			!keywordCaseSensitive ||
+			minDurationSeconds.trim() !== '' ||
+			maxDurationSeconds.trim() !== '' ||
+			!!publishedAfter ||
+			!!publishedBefore
+		);
+	}
+
+	function getActiveFilterCount() {
+		let count = blacklistKeywords.length + whitelistKeywords.length;
+		if (minDurationSeconds.trim()) count += 1;
+		if (maxDurationSeconds.trim()) count += 1;
+		if (publishedAfter) count += 1;
+		if (publishedBefore) count += 1;
+		return count;
+	}
+
 	// 处理黑名单关键词输入框键盘事件
 	function handleBlacklistKeywordKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter') {
@@ -573,6 +610,35 @@
 	}
 
 	async function handleSubmit() {
+		advancedFilterValidationError = '';
+
+		let parsedMinDuration: number | null = null;
+		let parsedMaxDuration: number | null = null;
+		try {
+			parsedMinDuration = parseDurationInput(minDurationSeconds, '最短时长');
+			parsedMaxDuration = parseDurationInput(maxDurationSeconds, '最长时长');
+		} catch (error) {
+			toast.error('过滤条件无效', { description: (error as Error).message });
+			advancedFilterValidationError = (error as Error).message;
+			return;
+		}
+
+		if (
+			parsedMinDuration !== null &&
+			parsedMaxDuration !== null &&
+			parsedMinDuration > parsedMaxDuration
+		) {
+			advancedFilterValidationError = '最短时长不能大于最长时长';
+			toast.error('过滤条件无效', { description: advancedFilterValidationError });
+			return;
+		}
+
+		if (publishedAfter && publishedBefore && publishedAfter > publishedBefore) {
+			advancedFilterValidationError = '投稿起始日期不能晚于投稿截止日期';
+			toast.error('过滤条件无效', { description: advancedFilterValidationError });
+			return;
+		}
+
 		// 验证表单
 		if (sourceType !== 'watch_later' && !sourceId) {
 			toast.error('请输入ID', { description: '视频源ID不能为空' });
@@ -673,15 +739,18 @@
 				const result = await api.addVideoSource(params);
 
 				if (result.data.success) {
-					// 如果同时设置了白名单或修改了大小写敏感设置，需要额外调用API更新
-					if ((whitelistKeywords.length > 0 || !keywordCaseSensitive) && result.data.source_id) {
+					if (hasAdvancedFilters() && result.data.source_id) {
 						try {
 							await api.updateVideoSourceKeywordFilters(
 								sourceType,
 								result.data.source_id,
 								blacklistKeywords,
 								whitelistKeywords,
-								keywordCaseSensitive
+								keywordCaseSensitive,
+								parsedMinDuration,
+								parsedMaxDuration,
+								publishedAfter,
+								publishedBefore
 							);
 						} catch (e) {
 							console.warn('更新关键词过滤器失败:', e);
@@ -755,6 +824,11 @@
 			newBlacklistKeyword = '';
 			newWhitelistKeyword = '';
 			keywordCaseSensitive = true;
+			minDurationSeconds = '';
+			maxDurationSeconds = '';
+			publishedAfter = '';
+			publishedBefore = '';
+			advancedFilterValidationError = '';
 			showKeywordSection = false;
 			// 重置下载选项
 			audioOnly = false;
@@ -3000,11 +3074,11 @@
 								<div class="flex items-center gap-2">
 									<FilterIcon class="h-4 w-4 text-purple-600 dark:text-purple-400" />
 									<span class="font-medium text-purple-800 dark:text-purple-200">关键词过滤器</span>
-									{#if blacklistKeywords.length > 0 || whitelistKeywords.length > 0}
+									{#if getActiveFilterCount() > 0}
 										<span
 											class="rounded-full bg-purple-600 px-2 py-0.5 text-xs text-white dark:bg-purple-500"
 										>
-											{blacklistKeywords.length + whitelistKeywords.length}
+											{getActiveFilterCount()}
 										</span>
 									{/if}
 								</div>
@@ -3080,6 +3154,80 @@
 											? '启用：ABC 和 abc 被视为不同的关键词'
 											: '禁用：ABC 和 abc 被视为相同的关键词'}
 									</p>
+
+									<div
+										class="rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950"
+									>
+										<p class="text-xs font-medium text-amber-800 dark:text-amber-200">
+											附加过滤条件
+										</p>
+										<div class="mt-2 grid gap-2 md:grid-cols-2">
+											<div class="space-y-1">
+												<label
+													for="add-source-min-duration"
+													class="text-[10px] font-medium text-gray-700 dark:text-gray-300"
+													>最短时长（秒）</label
+												>
+												<Input
+													id="add-source-min-duration"
+													type="number"
+													min="0"
+													step="1"
+													bind:value={minDurationSeconds}
+													placeholder="例如 60"
+													class="h-8 text-xs"
+												/>
+											</div>
+											<div class="space-y-1">
+												<label
+													for="add-source-max-duration"
+													class="text-[10px] font-medium text-gray-700 dark:text-gray-300"
+													>最长时长（秒）</label
+												>
+												<Input
+													id="add-source-max-duration"
+													type="number"
+													min="0"
+													step="1"
+													bind:value={maxDurationSeconds}
+													placeholder="例如 1800"
+													class="h-8 text-xs"
+												/>
+											</div>
+											<div class="space-y-1">
+												<label
+													for="add-source-published-after"
+													class="text-[10px] font-medium text-gray-700 dark:text-gray-300"
+													>投稿起始日期</label
+												>
+												<Input
+													id="add-source-published-after"
+													type="date"
+													bind:value={publishedAfter}
+													class="h-8 text-xs"
+												/>
+											</div>
+											<div class="space-y-1">
+												<label
+													for="add-source-published-before"
+													class="text-[10px] font-medium text-gray-700 dark:text-gray-300"
+													>投稿截止日期</label
+												>
+												<Input
+													id="add-source-published-before"
+													type="date"
+													bind:value={publishedBefore}
+													class="h-8 text-xs"
+												/>
+											</div>
+										</div>
+										<p class="mt-2 text-[10px] text-amber-700 dark:text-amber-300">
+											留空表示不限制。投稿时间按自然日过滤，起止日期均包含当天。
+										</p>
+										{#if advancedFilterValidationError}
+											<p class="mt-1 text-[10px] text-red-500">{advancedFilterValidationError}</p>
+										{/if}
+									</div>
 
 									<!-- 标签页切换 -->
 									<div class="flex border-b border-gray-200 dark:border-gray-700">

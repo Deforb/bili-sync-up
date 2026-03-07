@@ -9108,25 +9108,48 @@ async fn preallocate_submission_up_seasonal_mappings(
     grouped_items.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
 
     let total_groups = grouped_items.len();
-    let mut unchanged = 0usize;
-    let mut reassigned = 0usize;
+    let mut frozen = 0usize;
+    let mut repaired = 0usize;
     let mut created = 0usize;
+    let max_existing_row = connection
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            r#"
+            SELECT COALESCE(MAX(season_id), 0)
+            FROM collection_season_mapping
+            WHERE up_mid = ? AND base_path = ?
+            "#,
+            vec![up_mid.into(), grouped_base_path.clone().into()],
+        ))
+        .await?;
+    let mut next_new_season = max_existing_row
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(0)
+        .max(0)
+        + 1;
 
-    // 连续重排：按“最早发布时间 + 稳定键”排序后，始终分配 1..N。
-    // 这样可以在删源重加、清理旧映射后自动恢复连续季号，避免 Season 编号断档。
-    for (index, (collection_id, _mapping_key, earliest_pubtime)) in grouped_items.into_iter().enumerate() {
-        let season_number = i32::try_from(index + 1).unwrap_or(i32::MAX).max(1);
-        match existing_map.get(&collection_id) {
-            Some((existing_season, mapped_up_mid)) if *mapped_up_mid == up_mid && *existing_season == season_number => {
-                unchanged += 1;
+    // 冻结已有季号：已有映射始终复用原季号，新分组只拿当前最大季号 + 1。
+    // 这样后续新增合集/多P不会顶掉现有 Season 编号；合集源聚合逻辑不受影响。
+    for (collection_id, _mapping_key, earliest_pubtime) in grouped_items.into_iter() {
+        let season_number = match existing_map.get(&collection_id) {
+            Some((existing_season, mapped_up_mid)) if *mapped_up_mid == up_mid && *existing_season > 0 => {
+                frozen += 1;
+                *existing_season
             }
             Some(_) => {
-                reassigned += 1;
+                let allocated = next_new_season.max(1);
+                next_new_season = allocated + 1;
+                repaired += 1;
+                allocated
             }
             None => {
+                let allocated = next_new_season.max(1);
+                next_new_season = allocated + 1;
                 created += 1;
+                allocated
             }
-        }
+        };
 
         let pub_year = earliest_pubtime.year();
         let pub_quarter = ((earliest_pubtime.month0() / 3) + 1) as i32;
@@ -9163,8 +9186,8 @@ async fn preallocate_submission_up_seasonal_mappings(
     }
 
     info!(
-        "投稿源「{}」分季预分配完成：分组 {} 个，保持 {} 个，重排 {} 个，新增 {} 个",
-        submission_source.upper_name, total_groups, unchanged, reassigned, created
+        "投稿源「{}」分季预分配完成：分组 {} 个，冻结旧号 {} 个，修复异常 {} 个，新增 {} 个",
+        submission_source.upper_name, total_groups, frozen, repaired, created
     );
 
     Ok(())

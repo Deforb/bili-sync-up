@@ -26,6 +26,7 @@ pub struct Model {
     pub max_duration_seconds: Option<i32>,
     pub published_after: Option<String>,
     pub published_before: Option<String>,
+    pub episode_order_strategy: i32,
     pub aggregate_enabled: bool,
     pub aggregate_season_number: Option<i32>,
     pub audio_only: bool,

@@ -8,7 +8,7 @@ pub use captcha_solver::CaptchaSolver;
 use chrono::serde::ts_seconds;
 use chrono::{DateTime, Utc};
 pub use client::{BiliClient, Client, SearchResult};
-pub use collection::{Collection, CollectionItem, CollectionType};
+pub use collection::{Collection, CollectionEpisodeOrderStrategy, CollectionItem, CollectionType};
 pub use credential::Credential;
 pub use danmaku::DanmakuOption;
 pub use dynamic::Dynamic;

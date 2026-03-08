@@ -54,6 +54,30 @@ pub struct CollectionItem {
     pub collection_type: CollectionType,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum CollectionEpisodeOrderStrategy {
+    Legacy = 0,
+    SeasonHeadTailOldestFirst = 1,
+}
+
+impl From<CollectionEpisodeOrderStrategy> for i32 {
+    fn from(v: CollectionEpisodeOrderStrategy) -> Self {
+        match v {
+            CollectionEpisodeOrderStrategy::Legacy => 0,
+            CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst => 1,
+        }
+    }
+}
+
+impl From<i32> for CollectionEpisodeOrderStrategy {
+    fn from(v: i32) -> Self {
+        match v {
+            1 => CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst,
+            _ => CollectionEpisodeOrderStrategy::Legacy,
+        }
+    }
+}
+
 pub struct Collection<'a> {
     client: &'a BiliClient,
     collection: &'a CollectionItem,
@@ -144,7 +168,6 @@ impl<'a> Collection<'a> {
                     vec![
                         ("mid", self.collection.mid.as_str()),
                         ("season_id", self.collection.sid.as_str()),
-                        ("sort_reverse", "true"),
                         ("page_num", page.as_str()),
                         ("page_size", "30"),
                     ],
@@ -219,16 +242,55 @@ impl<'a> Collection<'a> {
         }
     }
 
-    /// 获取合集中所有视频的正确顺序（UP主定义的顺序）
+    /// 获取合集中所有视频的正确顺序。
+    /// - Legacy：保持旧合集源行为。
+    /// - SeasonHeadTailOldestFirst：对 season 合集取网页默认顺序后，只比较首尾投稿时间，
+    ///   若首个视频更新于末尾视频，则整体反转，确保 E01 位于更旧的一端。
     /// 返回 bvid -> episode_number 的映射
-    pub async fn get_video_order_map(&self) -> Result<HashMap<String, i32>> {
+    pub async fn get_video_order_map(
+        &self,
+        strategy: CollectionEpisodeOrderStrategy,
+    ) -> Result<HashMap<String, i32>> {
         let mut order_map = HashMap::new();
+        let mut ordered_videos = self.get_video_order_entries(strategy).await?;
+        if self.collection.collection_type == CollectionType::Season
+            && strategy == CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst
+        {
+            if should_reverse_season_order(&ordered_videos) {
+                ordered_videos.reverse();
+                debug!(
+                    "合集 {:?} 默认顺序首尾方向为从新到旧，已整体反转以确保最旧视频为 E01",
+                    self.collection
+                );
+            } else {
+                debug!(
+                    "合集 {:?} 默认顺序首尾方向已满足最旧视频在前，保持网页默认顺序",
+                    self.collection
+                );
+            }
+        }
+
+        for (episode_number, (bvid, _pubdate)) in ordered_videos.into_iter().enumerate() {
+            order_map.insert(bvid, (episode_number as i32) + 1);
+        }
+
+        debug!(
+            "获取合集 {:?} 的视频顺序，共 {} 个视频",
+            self.collection,
+            order_map.len()
+        );
+        Ok(order_map)
+    }
+
+    async fn get_video_order_entries(
+        &self,
+        strategy: CollectionEpisodeOrderStrategy,
+    ) -> Result<Vec<(String, i64)>> {
+        let mut ordered_videos = Vec::new();
         let mut page = 1;
-        let mut episode_number = 1;
 
         loop {
             let page_str = page.to_string();
-            // 使用 sort_reverse=false 获取正序（UP主定义的顺序）
             let (url, query) = match self.collection.collection_type {
                 CollectionType::Series => (
                     "https://api.bilibili.com/x/series/archives",
@@ -237,7 +299,7 @@ impl<'a> Collection<'a> {
                             ("mid", self.collection.mid.as_str()),
                             ("series_id", self.collection.sid.as_str()),
                             ("only_normal", "true"),
-                            ("sort", "asc"), // 正序
+                            ("sort", "asc"),
                             ("pn", page_str.as_str()),
                             ("ps", "30"),
                         ],
@@ -246,16 +308,27 @@ impl<'a> Collection<'a> {
                 ),
                 CollectionType::Season => (
                     "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list",
-                    encoded_query(
-                        vec![
-                            ("mid", self.collection.mid.as_str()),
-                            ("season_id", self.collection.sid.as_str()),
-                            ("sort_reverse", "false"), // 正序
-                            ("page_num", page_str.as_str()),
-                            ("page_size", "30"),
-                        ],
-                        MIXIN_KEY.load().as_deref(),
-                    ),
+                    match strategy {
+                        CollectionEpisodeOrderStrategy::Legacy => encoded_query(
+                            vec![
+                                ("mid", self.collection.mid.as_str()),
+                                ("season_id", self.collection.sid.as_str()),
+                                ("sort_reverse", "false"),
+                                ("page_num", page_str.as_str()),
+                                ("page_size", "30"),
+                            ],
+                            MIXIN_KEY.load().as_deref(),
+                        ),
+                        CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst => encoded_query(
+                            vec![
+                                ("mid", self.collection.mid.as_str()),
+                                ("season_id", self.collection.sid.as_str()),
+                                ("page_num", page_str.as_str()),
+                                ("page_size", "30"),
+                            ],
+                            MIXIN_KEY.load().as_deref(),
+                        ),
+                    },
                 ),
             };
 
@@ -278,15 +351,14 @@ impl<'a> Collection<'a> {
                 }
                 for video in arr {
                     if let Some(bvid) = video["bvid"].as_str() {
-                        order_map.insert(bvid.to_string(), episode_number);
-                        episode_number += 1;
+                        let pubdate = video["pubdate"].as_i64().unwrap_or_default();
+                        ordered_videos.push((bvid.to_string(), pubdate));
                     }
                 }
             } else {
                 break;
             }
 
-            // 检查是否还有下一页
             let page_info = &videos["data"]["page"];
             let fields = match self.collection.collection_type {
                 CollectionType::Series => ["num", "size", "total"],
@@ -304,12 +376,14 @@ impl<'a> Collection<'a> {
             }
         }
 
-        debug!(
-            "获取合集 {:?} 的视频顺序，共 {} 个视频",
-            self.collection,
-            order_map.len()
-        );
-        Ok(order_map)
+        Ok(ordered_videos)
+    }
+}
+
+fn should_reverse_season_order(entries: &[(String, i64)]) -> bool {
+    match (entries.first(), entries.last()) {
+        (Some((_, first_pubdate)), Some((_, last_pubdate))) => first_pubdate > last_pubdate,
+        _ => false,
     }
 }
 
@@ -372,5 +446,61 @@ mod tests {
             let info: CollectionInfo = serde_json::from_str(json).unwrap();
             assert_eq!(info, expect);
         }
+    }
+
+    #[test]
+    fn test_should_reverse_season_order_oldest_first() {
+        let entries = vec![
+            ("BV1".to_string(), 100),
+            ("BV2".to_string(), 200),
+            ("BV3".to_string(), 300),
+        ];
+        assert!(!should_reverse_season_order(&entries));
+    }
+
+    #[test]
+    fn test_should_reverse_season_order_newest_first() {
+        let entries = vec![
+            ("BV1".to_string(), 300),
+            ("BV2".to_string(), 200),
+            ("BV3".to_string(), 100),
+        ];
+        assert!(should_reverse_season_order(&entries));
+    }
+
+    #[test]
+    fn test_should_reverse_season_order_mixed_but_first_is_newer() {
+        let entries = vec![
+            ("BV1".to_string(), 300),
+            ("BV2".to_string(), 100),
+            ("BV3".to_string(), 200),
+        ];
+        assert!(should_reverse_season_order(&entries));
+    }
+
+    #[test]
+    fn test_should_reverse_season_order_mixed_but_first_is_older() {
+        let entries = vec![
+            ("BV1".to_string(), 100),
+            ("BV2".to_string(), 300),
+            ("BV3".to_string(), 200),
+        ];
+        assert!(!should_reverse_season_order(&entries));
+    }
+
+    #[test]
+    fn test_collection_episode_order_strategy_from_i32() {
+        assert_eq!(
+            CollectionEpisodeOrderStrategy::from(0),
+            CollectionEpisodeOrderStrategy::Legacy
+        );
+        assert_eq!(
+            CollectionEpisodeOrderStrategy::from(1),
+            CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst
+        );
+        assert_eq!(
+            CollectionEpisodeOrderStrategy::from(99),
+            CollectionEpisodeOrderStrategy::Legacy
+        );
     }
 }

@@ -2780,6 +2780,9 @@ pub async fn add_video_source_internal(
                 max_duration_seconds: sea_orm::Set(None),
                 published_after: sea_orm::Set(None),
                 published_before: sea_orm::Set(None),
+                episode_order_strategy: sea_orm::Set(
+                    crate::bilibili::CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst.into(),
+                ),
                 aggregate_enabled: sea_orm::Set(aggregate_enabled),
                 aggregate_season_number: sea_orm::Set(aggregate_season_number),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),

@@ -1092,9 +1092,8 @@ pub async fn refresh_video_source<'a>(
         }
     }
 
-    // 合集源：检查并更新 episode_number
+    // 合集源：仅在缺少 episode_number 时回填，避免影响既有合集源的历史顺序。
     if let VideoSourceEnum::Collection(collection_source) = video_source {
-        // 检查是否有视频缺少 episode_number
         let videos_without_episode = video::Entity::find()
             .filter(video::Column::CollectionId.eq(collection_source.id))
             .filter(video::Column::EpisodeNumber.is_null())
@@ -1106,13 +1105,13 @@ pub async fn refresh_video_source<'a>(
                 "合集「{}」有 {} 个视频缺少集数序号，正在从API获取正确顺序...",
                 collection_source.name, videos_without_episode
             );
-            // 获取任意一个视频的bvid来触发更新
             if let Some(any_video) = video::Entity::find()
                 .filter(video::Column::CollectionId.eq(collection_source.id))
                 .one(connection)
                 .await?
             {
-                match get_collection_video_episode_number(connection, collection_source.id, &any_video.bvid).await {
+                match get_collection_video_episode_number(connection, collection_source.id, &any_video.bvid).await
+                {
                     Ok(_) => {
                         info!("合集「{}」的视频集数序号已更新", collection_source.name);
                     }
@@ -10291,7 +10290,7 @@ async fn get_collection_video_episode_number(
     collection_id: i32,
     bvid: &str,
 ) -> Result<i32> {
-    use bili_sync_entity::{collection, video};
+    use bili_sync_entity::video;
     use sea_orm::*;
 
     // 1. 首先检查该视频是否已有episode_number
@@ -10308,13 +10307,27 @@ async fn get_collection_video_episode_number(
     }
 
     // 2. 如果没有episode_number，从API获取正确顺序并更新所有视频
-    // 获取合集信息
+    let order_map = refresh_collection_video_episode_numbers(connection, collection_id).await?;
+
+    // 4. 返回当前视频的集数
+    order_map
+        .get(bvid)
+        .copied()
+        .ok_or_else(|| anyhow!("视频 {} 在合集 {} 的API响应中未找到", bvid, collection_id))
+}
+
+async fn refresh_collection_video_episode_numbers(
+    connection: &DatabaseConnection,
+    collection_id: i32,
+) -> Result<HashMap<String, i32>> {
+    use bili_sync_entity::{collection, video};
+    use sea_orm::*;
+
     let collection_model = collection::Entity::find_by_id(collection_id)
         .one(connection)
         .await?
         .ok_or_else(|| anyhow!("合集 {} 不存在", collection_id))?;
 
-    // 构建Collection对象
     use crate::bilibili::{BiliClient, Collection, CollectionItem, CollectionType};
     let bili_client = BiliClient::new(String::new());
     let collection_item = CollectionItem {
@@ -10324,15 +10337,16 @@ async fn get_collection_video_episode_number(
     };
     let collection = Collection::new(&bili_client, &collection_item);
 
-    // 获取正确的视频顺序
-    let order_map = collection.get_video_order_map().await?;
+    let strategy = crate::bilibili::CollectionEpisodeOrderStrategy::from(
+        collection_model.episode_order_strategy,
+    );
+    let order_map = collection.get_video_order_map(strategy).await?;
     debug!(
         "从API获取合集 {} 的视频顺序，共 {} 个视频",
         collection_id,
         order_map.len()
     );
 
-    // 3. 更新数据库中所有视频的episode_number
     for (video_bvid, episode_num) in &order_map {
         video::Entity::update_many()
             .filter(video::Column::CollectionId.eq(collection_id))
@@ -10343,11 +10357,7 @@ async fn get_collection_video_episode_number(
     }
     info!("已更新合集 {} 中 {} 个视频的集数序号", collection_id, order_map.len());
 
-    // 4. 返回当前视频的集数
-    order_map
-        .get(bvid)
-        .copied()
-        .ok_or_else(|| anyhow!("视频 {} 在合集 {} 的API响应中未找到", bvid, collection_id))
+    Ok(order_map)
 }
 
 /// 修复page表中错误的video_id

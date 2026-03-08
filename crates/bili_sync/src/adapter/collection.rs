@@ -11,7 +11,10 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::{DatabaseConnection, Unchanged};
 
 use crate::adapter::{VideoSource, VideoSourceEnum, _ActiveModel};
-use crate::bilibili::{BiliClient, Collection, CollectionItem, CollectionType, VideoInfo};
+use crate::bilibili::{
+    BiliClient, Collection, CollectionEpisodeOrderStrategy, CollectionItem, CollectionType,
+    VideoInfo,
+};
 
 impl VideoSource for collection::Model {
     fn filter_expr(&self) -> SimpleExpr {
@@ -203,6 +206,7 @@ pub(super) async fn collection_from<'a>(
         latest_row_at: Set("1970-01-01 00:00:00".to_string()),
         enabled: Set(true),
         scan_deleted_videos: Set(false),
+        episode_order_strategy: Set(CollectionEpisodeOrderStrategy::SeasonHeadTailOldestFirst.into()),
         ..Default::default()
     })
     .on_conflict(

@@ -273,6 +273,8 @@ impl VideoInfo {
                 show_title,
                 staff,
                 ugc_season,
+                is_upower_exclusive,
+                is_upower_play,
                 ..
             } => {
                 // 投稿里的 UGC 合集（ugc_season）只有在合集归属确实属于当前 UP 时，
@@ -346,6 +348,8 @@ impl VideoInfo {
                     upper_id: Set(upper.mid),
                     upper_name: Set(upper.name),
                     upper_face: Set(upper.face),
+                    is_charge_video: Set(is_upower_exclusive.unwrap_or(false)),
+                    charge_can_play: Set(is_upower_play.unwrap_or(false)),
                     // 保存staff信息到数据库
                     staff_info: Set(staff.map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null))),
                     // 投稿合集标识与集序（仅在ugc_season存在时更新）

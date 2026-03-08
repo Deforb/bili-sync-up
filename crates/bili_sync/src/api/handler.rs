@@ -1344,6 +1344,7 @@ pub async fn get_videos(
                 u32,
                 String,
                 bool,
+                bool,
                 Option<String>,
                 Option<i32>,
             );
@@ -1359,6 +1360,7 @@ pub async fn get_videos(
                     video::Column::DownloadStatus,
                     video::Column::Cover,
                     video::Column::Valid,
+                    video::Column::IsChargeVideo,
                     video::Column::SeasonId,
                     video::Column::SourceType,
                 ])
@@ -1371,6 +1373,7 @@ pub async fn get_videos(
                     i32,
                     u32,
                     String,
+                    bool,
                     bool,
                     Option<String>,
                     Option<i32>,
@@ -1393,6 +1396,7 @@ pub async fn get_videos(
                         download_status,
                         cover,
                         valid,
+                        is_charge_video,
                         _season_id,
                         _source_type,
                     )| {
@@ -1406,6 +1410,7 @@ pub async fn get_videos(
                             *download_status,
                             cover.clone(),
                             *valid,
+                            *is_charge_video,
                         ))
                     },
                 )
@@ -1424,6 +1429,7 @@ pub async fn get_videos(
                     _download_status,
                     _cover,
                     _valid,
+                    _is_charge_video,
                     season_id,
                     source_type,
                 ),
@@ -1475,6 +1481,7 @@ pub async fn get_video(
             video::Column::DownloadStatus,
             video::Column::Cover,
             video::Column::Valid,
+            video::Column::IsChargeVideo,
             video::Column::SeasonId,
             video::Column::SourceType,
         ])
@@ -1488,13 +1495,14 @@ pub async fn get_video(
             u32,
             String,
             bool,
+            bool,
             Option<String>,
             Option<i32>,
         )>()
         .one(db.as_ref())
         .await?;
 
-    let Some((_id, bvid, name, upper_name, path, category, download_status, cover, valid, season_id, source_type)) =
+    let Some((_id, bvid, name, upper_name, path, category, download_status, cover, valid, is_charge_video, season_id, source_type)) =
         raw_video
     else {
         return Err(InnerApiError::NotFound(id).into());
@@ -1511,6 +1519,7 @@ pub async fn get_video(
         download_status,
         cover,
         valid,
+        is_charge_video,
     ));
 
     // 为番剧类型的视频填充真实标题

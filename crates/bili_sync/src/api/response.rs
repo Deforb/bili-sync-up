@@ -285,8 +285,40 @@ pub struct VideoInfo {
     pub download_status: [u32; 5],
     pub cover: String,
     pub valid: bool,
+    pub is_charge_video: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bangumi_title: Option<String>, // 番剧真实标题，用于番剧类型视频的显示
+}
+
+impl From<(i32, String, String, String, String, i32, u32, String, bool, bool)> for VideoInfo {
+    fn from(
+        (id, bvid, name, upper_name, path, category, download_status, cover, valid, is_charge_video): (
+            i32,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            u32,
+            String,
+            bool,
+            bool,
+        ),
+    ) -> Self {
+        Self {
+            id,
+            bvid,
+            name,
+            upper_name,
+            path,
+            category,
+            download_status: VideoStatus::from(download_status).into(),
+            cover,
+            valid,
+            is_charge_video,
+            bangumi_title: None, // 默认为None，将在API层根据视频类型填充
+        }
+    }
 }
 
 impl From<(i32, String, String, String, String, i32, u32, String, bool)> for VideoInfo {
@@ -303,18 +335,7 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool)> for Vid
             bool,
         ),
     ) -> Self {
-        Self {
-            id,
-            bvid,
-            name,
-            upper_name,
-            path,
-            category,
-            download_status: VideoStatus::from(download_status).into(),
-            cover,
-            valid,
-            bangumi_title: None, // 默认为None，将在API层根据视频类型填充
-        }
+        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, valid, false))
     }
 }
 
@@ -330,8 +351,8 @@ impl From<(i32, String, String, String, String, i32, u32, String)> for VideoInfo
             u32,
             String,
         ),
-    ) -> Self {
-        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, true))
+        ) -> Self {
+        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, true, false))
     }
 }
 

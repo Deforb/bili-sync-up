@@ -289,6 +289,14 @@
 				</div>
 			{/if}
 
+			{#if video.is_charge_video}
+				<div class="absolute top-2 {selectionMode ? 'left-10' : 'left-2'} z-20">
+					<Badge class="bg-amber-500 text-xs text-white shadow-md hover:bg-amber-500">
+						充电视频
+					</Badge>
+				</div>
+			{/if}
+
 			<!-- 状态徽章覆盖在封面上 -->
 			<div class="absolute top-2 right-2 z-20">
 				<Badge variant={overallStatus.color} class="shrink-0 text-xs shadow-md">
@@ -309,6 +317,11 @@
 					on:click|stopPropagation
 					class="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 				/>
+			{/if}
+			{#if (!video.cover || mode !== 'default') && video.is_charge_video}
+				<Badge class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500">
+					充电视频
+				</Badge>
 			{/if}
 			<CardTitle
 				class="line-clamp-2 min-w-0 flex-1 cursor-default text-sm leading-tight"

@@ -718,7 +718,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
 
                         // 检查是否有新视频信息需要添加到收集器（修复：同时检查数量和向量）
                         if !new_videos.is_empty() {
-                            // 获取待删除的视频ID列表，过滤掉充电专享视频
+                            // 获取待删除的视频ID列表，避免把正在删除中的视频重复加入通知收集器
                             let pending_delete_video_ids =
                                 crate::task::VIDEO_DELETE_TASK_QUEUE.get_pending_video_ids().await;
 
@@ -730,7 +730,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                                     if let Some(video_id) = video.video_id {
                                         let is_pending_delete = pending_delete_video_ids.contains(&video_id);
                                         if is_pending_delete {
-                                            debug!("过滤掉待删除的充电视频: {} (ID: {})", video.title, video_id);
+                                            debug!("过滤掉待删除中的视频: {} (ID: {})", video.title, video_id);
                                         }
                                         !is_pending_delete
                                     } else {
@@ -743,7 +743,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             let filtered_count = filtered_videos.len();
                             let original_count = new_video_count;
                             if filtered_count < original_count {
-                                info!("过滤充电视频: 原始 {} 个，过滤后 {} 个", original_count, filtered_count);
+                                info!("过滤待删除中的视频: 原始 {} 个，过滤后 {} 个", original_count, filtered_count);
                             }
 
                             if !filtered_videos.is_empty() {
@@ -756,10 +756,7 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                                 )
                                 .await
                                 {
-                                    debug!(
-                                        "向scan_collector添加 {} 个新视频信息（已过滤充电视频）",
-                                        filtered_videos.len()
-                                    );
+                                    debug!("向scan_collector添加 {} 个新视频信息（已过滤待删除中的视频）", filtered_videos.len());
                                     scan_collector.add_new_videos(&video_source, filtered_videos);
                                 } else {
                                     warn!("无法获取视频源信息，跳过添加新视频到收集器");

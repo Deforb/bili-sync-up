@@ -259,7 +259,6 @@ use crate::bilibili::{
 };
 use crate::config::ARGS;
 use crate::error::{DownloadAbortError, ExecutionStatus, ProcessPageError};
-use crate::task::{DeleteVideoTask, VIDEO_DELETE_TASK_QUEUE};
 use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
@@ -1429,25 +1428,14 @@ pub async fn fetch_video_details(
                                 unreachable!()
                             };
 
-                            // 革命性充电视频检测：基于API返回的upower字段进行精确判断
+                            // 充电视频不再自动删除。
+                            // 对“未充电不可播放”的视频，后续下载阶段会保留目录/元数据，
+                            // 并创建同名媒体占位文件，方便用户手动覆盖。
                             if let (Some(true), Some(false)) = (is_upower_exclusive, is_upower_play) {
-                                info!("「{}」检测到充电专享视频（未充电），将自动删除", &video_model.name);
-                                // 创建自动删除任务
-                                let delete_task = DeleteVideoTask {
-                                    video_id: video_model.id,
-                                    task_id: format!("auto_delete_upower_{}", video_model.id),
-                                };
-
-                                if let Err(delete_err) =
-                                    VIDEO_DELETE_TASK_QUEUE.enqueue_task(delete_task, connection).await
-                                {
-                                    error!("创建充电视频删除任务失败「{}」: {:#}", &video_model.name, delete_err);
-                                } else {
-                                    debug!("充电视频删除任务已加入队列「{}」", &video_model.name);
-                                }
-
-                                // 跳过后续处理，返回成功完成这个视频的处理
-                                return Ok(());
+                                info!(
+                                    "「{}」检测到充电专享视频（未充电），将保留元数据并创建占位文件",
+                                    &video_model.name
+                                );
                             }
 
                             // 日志记录upower字段状态（仅debug级别）
@@ -6499,6 +6487,80 @@ async fn refresh_page_info_from_view(
     Ok(Some(refreshed_page_info))
 }
 
+fn is_charge_video_locked(video_model: &video::Model) -> bool {
+    video_model.is_charge_video && !video_model.charge_can_play
+}
+
+fn is_charge_permission_error(err: &anyhow::Error) -> bool {
+    let classified = crate::error::ErrorClassifier::classify_error(err);
+    classified.error_type == crate::error::ErrorType::Permission
+        && classified.message.contains("充电专享视频")
+}
+
+async fn persist_charge_video_state(
+    connection: &DatabaseConnection,
+    video_id: i32,
+    is_charge_video: bool,
+    charge_can_play: bool,
+) {
+    if let Err(e) = (video::ActiveModel {
+        id: sea_orm::ActiveValue::Unchanged(video_id),
+        is_charge_video: Set(is_charge_video),
+        charge_can_play: Set(charge_can_play),
+        ..Default::default()
+    })
+    .update(connection)
+    .await
+    {
+        warn!(
+            "更新充电视频状态失败（不影响后续占位文件处理）: video_id={}, err={}",
+            video_id, e
+        );
+    }
+}
+
+async fn create_charge_video_placeholder(
+    page_path: &Path,
+    video_model: &video::Model,
+    page_info: &PageInfo,
+) -> Result<ExecutionStatus> {
+    ensure_parent_dir_for_file(page_path).await?;
+
+    match fs::metadata(page_path).await {
+        Ok(meta) if meta.is_file() && meta.len() > 0 => {
+            info!(
+                "充电视频已存在非空媒体文件，保留现有文件: 视频「{}」第{}页 {} -> {}",
+                &video_model.name,
+                page_info.page,
+                &page_info.name,
+                page_path.display()
+            );
+            return Ok(ExecutionStatus::Succeeded);
+        }
+        Ok(_) => {
+            let _ = remove_zero_byte_file_if_exists(page_path, "充电视频占位文件创建前检查").await;
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(
+                "检查充电视频占位文件失败，将继续尝试重建: {} ({})",
+                page_path.display(),
+                e
+            );
+        }
+    }
+
+    tokio::fs::File::create(page_path).await?;
+    info!(
+        "已为充电视频创建媒体占位文件: 视频「{}」第{}页 {} -> {}",
+        &video_model.name,
+        page_info.page,
+        &page_info.name,
+        page_path.display()
+    );
+    Ok(ExecutionStatus::Succeeded)
+}
+
 pub async fn fetch_page_video(
     should_run: bool,
     bili_client: &BiliClient,
@@ -6513,6 +6575,10 @@ pub async fn fetch_page_video(
 ) -> Result<ExecutionStatus> {
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
+    }
+
+    if is_charge_video_locked(video_model) {
+        return create_charge_video_placeholder(page_path, video_model, page_info).await;
     }
 
     let bili_video = Video::new(bili_client, video_model.bvid.clone());
@@ -6575,7 +6641,19 @@ pub async fn fetch_page_video(
                 }
                 return Err(e);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if is_charge_permission_error(&e) {
+                    info!(
+                        "检测到充电专享视频播放权限限制，改为创建占位文件: 视频「{}」第{}页 {}",
+                        &video_model.name,
+                        page_info_for_download.page,
+                        &page_info_for_download.name
+                    );
+                    persist_charge_video_state(connection, video_model.id, true, false).await;
+                    return create_charge_video_placeholder(page_path, video_model, &page_info_for_download).await;
+                }
+                return Err(e);
+            }
         }
     };
 

@@ -44,6 +44,10 @@ pub struct Model {
     pub actors: Option<String>,
     pub auto_download: bool,
     pub cid: Option<i64>,
+    #[sea_orm(default_value = "false")]
+    pub is_charge_video: bool,
+    #[sea_orm(default_value = "false")]
+    pub charge_can_play: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

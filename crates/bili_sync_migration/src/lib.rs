@@ -60,6 +60,7 @@ mod m20260222_000002_add_video_submission_membership_state;
 mod m20260307_000001_add_advanced_keyword_filters;
 mod m20260307_000002_add_collection_aggregate_fields;
 mod m20260308_000001_add_collection_episode_order_strategy;
+mod m20260308_000002_add_video_charge_flags;
 
 pub struct Migrator;
 
@@ -127,6 +128,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260307_000001_add_advanced_keyword_filters::Migration),
             Box::new(m20260307_000002_add_collection_aggregate_fields::Migration),
             Box::new(m20260308_000001_add_collection_episode_order_strategy::Migration),
+            Box::new(m20260308_000002_add_video_charge_flags::Migration),
         ]
     }
 }

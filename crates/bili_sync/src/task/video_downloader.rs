@@ -152,7 +152,7 @@ async fn try_disable_cancelled_submission_source(
                 resolved_name = status.name;
                 if resolved_name == "账号已注销" {
                     disable_reason = Some("已注销");
-                } else if status.control == 1 {
+                } else if status.control == 1 || status.silence == 1 {
                     disable_reason = Some("已封禁");
                 }
             }

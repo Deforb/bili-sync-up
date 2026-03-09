@@ -27,6 +27,8 @@ pub struct SubmissionAccountStatus {
     pub name: String,
     #[serde(default)]
     pub control: i32,
+    #[serde(default)]
+    pub silence: i32,
 }
 
 pub struct Submission<'a> {

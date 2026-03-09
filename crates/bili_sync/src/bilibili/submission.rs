@@ -21,6 +21,14 @@ use crate::utils::submission_checkpoint;
 /// 存储格式: (页码, 该页已处理的视频索引)
 pub static SUBMISSION_PAGE_TRACKER: Lazy<RwLock<HashMap<String, (usize, usize)>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SubmissionAccountStatus {
+    pub name: String,
+    #[serde(default)]
+    pub control: i32,
+}
+
 pub struct Submission<'a> {
     client: &'a BiliClient,
     upper_id: String,
@@ -61,6 +69,29 @@ impl<'a> Submission<'a> {
             .await?
             .validate()?;
         Ok(serde_json::from_value(res["data"]["card"].take())?)
+    }
+
+    pub async fn get_account_status(&self) -> Result<SubmissionAccountStatus> {
+        let mut res = self
+            .client
+            .request(Method::GET, "https://api.bilibili.com/x/space/wbi/acc/info")
+            .await
+            .query(&encoded_query(
+                vec![
+                    ("mid", self.upper_id.as_str()),
+                    ("platform", "web"),
+                    ("web_location", "1550101"),
+                    ("token", ""),
+                ],
+                MIXIN_KEY.load().as_deref(),
+            ))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .validate()?;
+        Ok(serde_json::from_value(res["data"].take())?)
     }
 
     async fn get_videos(&self, page: i32) -> Result<Value> {

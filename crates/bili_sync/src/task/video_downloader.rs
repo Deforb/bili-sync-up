@@ -140,26 +140,48 @@ async fn try_disable_cancelled_submission_source(
     };
 
     let mut resolved_name = model.upper_name.clone();
-    let mut is_cancelled = resolved_name == "账号已注销";
+    let mut disable_reason = if resolved_name == "账号已注销" {
+        Some("已注销")
+    } else {
+        None
+    };
 
-    if !is_cancelled {
-        match Submission::new(bili_client, upper_id.clone()).get_info().await {
-            Ok(upper) => {
-                resolved_name = upper.name;
-                is_cancelled = resolved_name == "账号已注销";
+    if disable_reason.is_none() {
+        match Submission::new(bili_client, upper_id.clone()).get_account_status().await {
+            Ok(status) => {
+                resolved_name = status.name;
+                if resolved_name == "账号已注销" {
+                    disable_reason = Some("已注销");
+                } else if status.control == 1 {
+                    disable_reason = Some("已封禁");
+                }
             }
             Err(fetch_err) => {
                 debug!(
-                    "回查UP主投稿源状态失败，暂不自动停用该源 (submission_id: {}, upper_id: {}): {}",
+                    "回查UP主投稿源账号状态失败，回退到基础信息判断 (submission_id: {}, upper_id: {}): {}",
                     source.id, upper_id, fetch_err
                 );
+                match Submission::new(bili_client, upper_id.clone()).get_info().await {
+                    Ok(upper) => {
+                        resolved_name = upper.name;
+                        if resolved_name == "账号已注销" {
+                            disable_reason = Some("已注销");
+                        }
+                    }
+                    Err(fallback_err) => {
+                        debug!(
+                            "回退获取UP主投稿源基础信息失败，暂不自动停用该源 (submission_id: {}, upper_id: {}): {}",
+                            source.id, upper_id, fallback_err
+                        );
+                    }
+                }
             }
         }
     }
 
-    if !is_cancelled {
+    let Some(disable_reason) = disable_reason else {
         return Ok(None);
-    }
+    };
 
     let now_str = now_standard_string();
     let mut active: entities::submission::ActiveModel = model.into();
@@ -169,7 +191,7 @@ async fn try_disable_cancelled_submission_source(
     active.next_scan_at = Set(None);
     active.update(connection).await?;
 
-    Ok(Some(resolved_name))
+    Ok(Some(format!("{}（{}）", resolved_name, disable_reason)))
 }
 
 /// 从数据库加载所有视频源的函数
@@ -848,12 +870,12 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             Ok(Some(source_name)) => {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
-                                warn!("检测到已注销UP主投稿源「{}」，已自动停用该源", source_name);
+                                info!("检测到已注销/已封禁UP主投稿源「{}」，已自动停用该源", source_name);
                                 continue;
                             }
                             Ok(None) => {}
                             Err(disable_err) => {
-                                warn!("自动停用已注销UP主投稿源失败 (ID: {}): {}", source.id, disable_err);
+                                warn!("自动停用已注销/已封禁UP主投稿源失败 (ID: {}): {}", source.id, disable_err);
                             }
                         }
 

@@ -192,7 +192,15 @@
 	}
 
 	type UpdateResult = { success: boolean; message: string };
-	type SuccessToast = { title: string; description?: string };
+	type SuccessToast = {
+		title: string;
+		description?: string;
+		variant?: 'success' | 'info';
+	};
+
+	function isQueuedMessage(message?: string | null): boolean {
+		return message?.includes('加入队列') ?? false;
+	}
 
 	async function updateAndReload<T extends UpdateResult>(
 		action: () => Promise<{ data: T }>,
@@ -213,10 +221,11 @@
 		}
 
 		const toastInfo = successToast ? successToast(result.data) : { title: result.data.message };
+		const showToast = toastInfo.variant === 'info' ? toast.info : toast.success;
 		if (toastInfo.description) {
-			toast.success(toastInfo.title, { description: toastInfo.description });
+			showToast(toastInfo.title, { description: toastInfo.description });
 		} else {
-			toast.success(toastInfo.title);
+			showToast(toastInfo.title);
 		}
 
 		await loadVideoSources();
@@ -563,10 +572,22 @@
 			() => api.deleteVideoSource(deleteSourceInfo.type, deleteSourceInfo.id, deleteLocalFiles),
 			{
 				errorTitle: '删除失败',
-				successToast: (data) => ({
-					title: '删除成功',
-					description: data.message + (deleteLocalFiles ? '，本地文件已删除' : '，本地文件已保留')
-				})
+				successToast: (data) => {
+					if (isQueuedMessage(data.message)) {
+						return {
+							title: '删除任务已入队',
+							description:
+								data.message +
+								(deleteLocalFiles ? '，处理完成后会同步删除本地文件' : '，本地文件将保留'),
+							variant: 'info'
+						};
+					}
+
+					return {
+						title: '删除成功',
+						description: data.message + (deleteLocalFiles ? '，本地文件已删除' : '，本地文件已保留')
+					};
+				}
 			}
 		);
 	}

@@ -1819,6 +1819,13 @@
 		selectedSubmissionVideos = selectedSubmissionVideos; // 触发响应式更新
 	}
 
+	function handleSubmissionCardKeydown(event: KeyboardEvent, bvid: string) {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			toggleSubmissionVideo(bvid);
+		}
+	}
+
 	// 全选投稿
 	function selectAllSubmissions() {
 		filteredSubmissionVideos.forEach((video) => selectedSubmissionVideos.add(video.bvid));
@@ -4619,11 +4626,15 @@
 										>
 											{#each filteredSubmissionVideos as video (video.bvid)}
 												<div
+													role="button"
+													tabindex="0"
 													class="hover:bg-muted relative rounded-lg border p-4 transition-all duration-300 hover:shadow-md {selectedSubmissionVideos.has(
 														video.bvid
 													)
 														? 'border-blue-300 bg-blue-50 dark:border-blue-600 dark:bg-blue-950'
 														: 'border-gray-200 dark:border-gray-700'} {isMobile ? 'h-auto' : 'h-[100px]'}"
+													onclick={() => toggleSubmissionVideo(video.bvid)}
+													onkeydown={(event) => handleSubmissionCardKeydown(event, video.bvid)}
 												>
 													<div class="flex h-full gap-3">
 														<div class="relative flex-shrink-0">
@@ -4639,6 +4650,7 @@
 																type="checkbox"
 																checked={selectedSubmissionVideos.has(video.bvid)}
 																onchange={() => toggleSubmissionVideo(video.bvid)}
+																onclick={(event) => event.stopPropagation()}
 																class="absolute top-1 right-1 z-10 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 dark:text-blue-400"
 															/>
 															<h4

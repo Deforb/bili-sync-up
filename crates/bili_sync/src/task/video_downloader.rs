@@ -7,7 +7,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Pa
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::Args;
-use crate::bilibili::{self, BiliClient, CollectionItem, CollectionType};
+use crate::bilibili::{self, BiliClient, CollectionItem, CollectionType, Submission};
 use crate::config::Config;
 use crate::initialization;
 use crate::task::TASK_CONTROLLER;
@@ -111,6 +111,65 @@ async fn update_submission_scan_state_error(
     active.update(connection).await?;
 
     Ok(())
+}
+
+fn is_submission_first_page_empty_error(err: &anyhow::Error) -> bool {
+    let error_text = format!("{:#}", err);
+    error_text.contains("no medias found in upper") && error_text.contains("page 1")
+}
+
+async fn try_disable_cancelled_submission_source(
+    connection: &DatabaseConnection,
+    bili_client: &BiliClient,
+    source: &VideoSourceWithId,
+    err: &anyhow::Error,
+) -> Result<Option<String>> {
+    if source.source_type != SourceType::Submission || !is_submission_first_page_empty_error(err) {
+        return Ok(None);
+    }
+
+    let Args::Submission { upper_id } = &source.args else {
+        return Ok(None);
+    };
+
+    let Some(model) = entities::submission::Entity::find_by_id(source.id)
+        .one(connection)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let mut resolved_name = model.upper_name.clone();
+    let mut is_cancelled = resolved_name == "账号已注销";
+
+    if !is_cancelled {
+        match Submission::new(bili_client, upper_id.clone()).get_info().await {
+            Ok(upper) => {
+                resolved_name = upper.name;
+                is_cancelled = resolved_name == "账号已注销";
+            }
+            Err(fetch_err) => {
+                debug!(
+                    "回查UP主投稿源状态失败，暂不自动停用该源 (submission_id: {}, upper_id: {}): {}",
+                    source.id, upper_id, fetch_err
+                );
+            }
+        }
+    }
+
+    if !is_cancelled {
+        return Ok(None);
+    }
+
+    let now_str = now_standard_string();
+    let mut active: entities::submission::ActiveModel = model.into();
+    active.upper_name = Set(resolved_name.clone());
+    active.enabled = Set(false);
+    active.last_scan_at = Set(Some(now_str));
+    active.next_scan_at = Set(None);
+    active.update(connection).await?;
+
+    Ok(Some(resolved_name))
 }
 
 /// 从数据库加载所有视频源的函数
@@ -777,6 +836,26 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                     }
                     Err(e) => {
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
+
+                        match try_disable_cancelled_submission_source(
+                            &optimized_connection,
+                            &bili_client,
+                            source,
+                            &e,
+                        )
+                        .await
+                        {
+                            Ok(Some(source_name)) => {
+                                processed_sources += 1;
+                                last_successful_source = Some(source);
+                                warn!("检测到已注销UP主投稿源「{}」，已自动停用该源", source_name);
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(disable_err) => {
+                                warn!("自动停用已注销UP主投稿源失败 (ID: {}): {}", source.id, disable_err);
+                            }
+                        }
 
                         if submission_scan_strategy_enabled(&config) && source.source_type == SourceType::Submission {
                             let is_risk_control = classified_error.error_type == crate::error::ErrorType::RiskControl;

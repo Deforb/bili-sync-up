@@ -2,7 +2,7 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa::ToSchema;
 
-#[derive(Deserialize, IntoParams, Default)]
+#[derive(Clone, Deserialize, IntoParams, Default)]
 pub struct VideosRequest {
     pub collection: Option<i32>,
     pub favorite: Option<i32>,

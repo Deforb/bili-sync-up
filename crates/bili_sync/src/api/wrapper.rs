@@ -33,6 +33,10 @@ impl<T: Serialize> ApiResponse<T> {
     pub fn internal_server_error(data: T) -> Self {
         Self { status_code: 500, data }
     }
+
+    pub fn into_data(self) -> T {
+        self.data
+    }
 }
 
 impl<T: Serialize> IntoResponse for ApiResponse<T> {

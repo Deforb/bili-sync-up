@@ -57,6 +57,7 @@ use crate::api::handler::{
     get_video_source_keyword_filters,
     get_video_sources,
     get_videos,
+    stream_videos,
     migrate_config_schema,
     pause_scanning_endpoint,
     poll_qr_status,
@@ -185,6 +186,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/ai-rename/clear-cache/{source_type}/{id}", post(clear_ai_rename_cache_for_source))
         .route("/api/{source_type}/{id}/ai-rename-history", post(ai_rename_history))
         .route("/api/videos", get(get_videos))
+        .route("/api/videos/live", get(stream_videos))
         .route("/api/videos/{id}", get(get_video))
         .route("/api/videos/{id}", delete(delete_video))
         .route("/api/videos/{id}/reset", post(reset_video))

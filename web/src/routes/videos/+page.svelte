@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import VideoCard from '$lib/components/video-card.svelte';
@@ -45,6 +45,10 @@
 	let videoSources: VideoSourcesResponse | null = null;
 	let loading = false;
 	let lastSearch: string | null = null;
+	let videosEventSource: EventSource | null = null;
+	let currentVideosStreamUrl: string | null = null;
+	let liveUpdateStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
+	let pendingInsertedCount = 0;
 
 	// 重置对话框
 	let resetAllDialogOpen = false;
@@ -289,6 +293,176 @@
 		};
 	}
 
+	function buildVideosStreamUrl(
+		query: string,
+		pageNum: number = 0,
+		filter?: { type: string; id: string } | null,
+		showFailedOnly: boolean = false,
+		sortBy: SortBy = 'id',
+		sortOrder: SortOrder = 'desc',
+		minHeight: number | null = null,
+		maxHeight: number | null = null
+	): string | null {
+		if (typeof localStorage === 'undefined') return null;
+		const token = localStorage.getItem('auth_token');
+		if (!token) return null;
+
+		const params = buildVideosRequest({
+			page: pageNum,
+			pageSize,
+			query,
+			videoSource: filter,
+			showFailedOnly,
+			sortBy,
+			sortOrder,
+			minHeight,
+			maxHeight
+		}) as Record<string, string | number | boolean | null | undefined>;
+
+		const searchParams = new URLSearchParams();
+		Object.entries(params).forEach(([key, value]) => {
+			if (value !== undefined && value !== null) {
+				searchParams.append(key, String(value));
+			}
+		});
+		searchParams.append('token', token);
+		return `/api/videos/live?${searchParams.toString()}`;
+	}
+
+	function stopVideosStream() {
+		if (videosEventSource) {
+			videosEventSource.close();
+			videosEventSource = null;
+		}
+		currentVideosStreamUrl = null;
+		liveUpdateStatus = 'idle';
+	}
+
+	function hasSameVideoOrder(current: VideoInfo[], next: VideoInfo[]): boolean {
+		if (current.length !== next.length) return false;
+		return current.every((video, index) => video.id === next[index]?.id);
+	}
+
+	function patchCurrentPageVideos(current: VideosResponse, next: VideosResponse): VideosResponse {
+		const nextById = new Map(next.videos.map((video) => [video.id, video]));
+		return {
+			...current,
+			videos: current.videos.map((video) => nextById.get(video.id) ?? video)
+		};
+	}
+
+	function applyLiveVideosUpdate(data: VideosResponse) {
+		if (!videosData) {
+			videosData = data;
+			setVideoListInfo(
+				data.videos.map((video) => video.id),
+				data.total_count,
+				pageSize
+			);
+			pendingInsertedCount = 0;
+			return;
+		}
+
+		if ($appStateStore.currentPage > 0) {
+			const current = videosData;
+			const totalDelta = Math.max(0, data.total_count - current.total_count);
+			const sameOrder = hasSameVideoOrder(current.videos, data.videos);
+
+			if (!sameOrder || totalDelta > 0) {
+				videosData = patchCurrentPageVideos(current, data);
+				setVideoListInfo(
+					current.videos.map((video) => video.id),
+					current.total_count,
+					pageSize
+				);
+				if (totalDelta > 0) {
+					pendingInsertedCount = Math.max(pendingInsertedCount, totalDelta);
+				}
+				return;
+			}
+		}
+
+		videosData = data;
+		setVideoListInfo(
+			data.videos.map((video) => video.id),
+			data.total_count,
+			pageSize
+		);
+		pendingInsertedCount = 0;
+
+		if (selectionMode) {
+			const visibleIds = new Set(data.videos.map((video) => video.id));
+			const nextSelected = new Set(Array.from(selectedVideos).filter((id) => visibleIds.has(id)));
+			if (nextSelected.size !== selectedVideos.size) {
+				selectedVideos = nextSelected;
+			}
+		}
+	}
+
+	function startVideosStream(
+		query: string,
+		pageNum: number = 0,
+		filter?: { type: string; id: string } | null,
+		showFailedOnly: boolean = false,
+		sortBy: SortBy = 'id',
+		sortOrder: SortOrder = 'desc',
+		minHeight: number | null = null,
+		maxHeight: number | null = null
+	) {
+		const streamUrl = buildVideosStreamUrl(
+			query,
+			pageNum,
+			filter,
+			showFailedOnly,
+			sortBy,
+			sortOrder,
+			minHeight,
+			maxHeight
+		);
+
+		if (!streamUrl) {
+			stopVideosStream();
+			return;
+		}
+
+		if (videosEventSource && currentVideosStreamUrl === streamUrl) {
+			return;
+		}
+
+		stopVideosStream();
+		currentVideosStreamUrl = streamUrl;
+		liveUpdateStatus = 'connecting';
+
+		const eventSource = new EventSource(streamUrl);
+		videosEventSource = eventSource;
+
+		eventSource.addEventListener('ready', () => {
+			liveUpdateStatus = 'connected';
+		});
+
+		eventSource.addEventListener('videos', (event) => {
+			try {
+				const payload = JSON.parse((event as MessageEvent).data) as VideosResponse;
+				applyLiveVideosUpdate(payload);
+				liveUpdateStatus = 'connected';
+			} catch (error) {
+				console.error('解析视频实时更新失败:', error);
+			}
+		});
+
+		eventSource.onerror = () => {
+			if (videosEventSource === eventSource) {
+				liveUpdateStatus = 'error';
+			}
+		};
+	}
+
+	async function handlePendingInsertedClick() {
+		pendingInsertedCount = 0;
+		setCurrentPage(0);
+		await goto(`/videos?${ToQuery($appStateStore)}`);
+	}
+
 	async function loadVideos(
 		query: string,
 		pageNum: number = 0,
@@ -324,6 +498,8 @@
 			result.data.total_count,
 			pageSize
 		);
+		pendingInsertedCount = 0;
+		startVideosStream(query, pageNum, filter, showFailedOnly, sortBy, sortOrder, minHeight, maxHeight);
 	}
 
 	async function loadVideoSources() {
@@ -698,6 +874,10 @@
 		displayPrefsReady = true;
 		loadVideoSources();
 	});
+
+	onDestroy(() => {
+		stopVideosStream();
+	});
 </script>
 
 <svelte:head>
@@ -997,7 +1177,34 @@
 			<span>
 				共 {videosData.total_count} 个视频，当前第 {$appStateStore.currentPage + 1} / {totalPages} 页
 			</span>
+			<Badge
+				variant="outline"
+				class={liveUpdateStatus === 'connected'
+					? 'border-green-200 bg-green-50 text-green-700'
+					: liveUpdateStatus === 'connecting'
+						? 'border-blue-200 bg-blue-50 text-blue-700'
+						: liveUpdateStatus === 'error'
+							? 'border-yellow-200 bg-yellow-50 text-yellow-700'
+							: 'border-muted-foreground/20 text-muted-foreground'}
+			>
+				{#if liveUpdateStatus === 'connected'}
+					进度实时更新中
+				{:else if liveUpdateStatus === 'connecting'}
+					进度实时连接中
+				{:else if liveUpdateStatus === 'error'}
+					进度实时重连中
+				{:else}
+					进度实时未开启
+				{/if}
+			</Badge>
 		</div>
+		{#if $appStateStore.currentPage > 0 && pendingInsertedCount > 0}
+			<div class="mt-2">
+				<Button variant="outline" size="sm" onclick={handlePendingInsertedClick}>
+					当前页外有 {pendingInsertedCount} 个新入库视频，点击跳到第一页查看
+				</Button>
+			</div>
+		{/if}
 	{/if}
 
 	<!-- 视频卡片网格 -->

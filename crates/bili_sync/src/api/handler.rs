@@ -1578,6 +1578,45 @@ pub async fn get_videos(
 }
 
 /// 获取视频详细信息，包括关联的所有 page
+pub async fn stream_videos(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Query(params): Query<VideosRequest>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("ready").data("connected"));
+
+        let mut interval = tokio::time::interval(StdDuration::from_secs(1));
+        let mut last_snapshot = String::new();
+
+        loop {
+            interval.tick().await;
+
+            match get_videos(Extension(db.clone()), Query(params.clone())).await {
+                Ok(response) => {
+                    let payload = response.into_data();
+                    match serde_json::to_string(&payload) {
+                        Ok(snapshot) => {
+                            if snapshot != last_snapshot {
+                                last_snapshot = snapshot;
+                                match Event::default().event("videos").json_data(&payload) {
+                                    Ok(event) => yield Ok(event),
+                                    Err(err) => warn!("构建视频实时推送事件失败: {}", err),
+                                }
+                            }
+                        }
+                        Err(err) => warn!("序列化视频实时推送数据失败: {}", err),
+                    }
+                }
+                Err(err) => {
+                    warn!("视频管理页实时刷新失败: {:?}", err);
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
 #[utoipa::path(
     get,
     path = "/api/videos/{id}",

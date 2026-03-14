@@ -4032,35 +4032,66 @@ pub async fn download_video_pages(
     // 预先获取合集封面URL（如果需要）
     let collection_cover_url = if is_collection && should_download_season_poster {
         if let VideoSourceEnum::Collection(collection_source) = video_source {
-            match get_collection_video_episode_number(connection, collection_source.id, &video_model.bvid).await {
-                Ok(1) => {
-                    // 第一个视频时从数据库重新获取最新的合集信息
-                    match collection::Entity::find_by_id(collection_source.id)
-                        .one(connection)
-                        .await
-                    {
-                        Ok(Some(fresh_collection)) => match fresh_collection.cover.as_ref() {
-                            Some(cover_url) if !cover_url.is_empty() => {
-                                info!("合集「{}」使用数据库保存的封面: {}", fresh_collection.name, cover_url);
-                                Some(cover_url.clone())
+            match collection::Entity::find_by_id(collection_source.id)
+                .one(connection)
+                .await
+            {
+                Ok(Some(fresh_collection)) => match fresh_collection.cover.as_ref() {
+                    Some(cover_url) if !cover_url.is_empty() => {
+                        info!("合集「{}」使用数据库保存的封面: {}", fresh_collection.name, cover_url);
+                        Some(cover_url.clone())
+                    }
+                    _ => {
+                        match bili_client.get_user_collections(fresh_collection.m_id, 1, 50).await {
+                            Ok(collections_response) => {
+                                let fetched_cover = collections_response
+                                    .collections
+                                    .iter()
+                                    .find(|item| item.sid.parse::<i64>().ok() == Some(fresh_collection.s_id))
+                                    .and_then(|item| {
+                                        let cover = item.cover.trim();
+                                        if cover.is_empty() {
+                                            None
+                                        } else {
+                                            Some(cover.to_string())
+                                        }
+                                    });
+
+                                if let Some(ref cover_url) = fetched_cover {
+                                    info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
+                                    let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
+                                    active_model.cover = Set(Some(cover_url.clone()));
+                                    if let Err(err) = active_model.update(connection).await {
+                                        warn!(
+                                            "回写合集封面到数据库失败（将继续使用本次结果）: collection_id={}, sid={}, err={}",
+                                            collection_source.id, collection_source.s_id, err
+                                        );
+                                    }
+                                } else {
+                                    info!(
+                                        "合集「{}」数据库和API中都没有稳定封面；若由非首集补封面，将不再回退为当前分集封面",
+                                        fresh_collection.name
+                                    );
+                                }
+
+                                fetched_cover
                             }
-                            _ => {
-                                info!("合集「{}」数据库中无封面URL，使用视频封面", fresh_collection.name);
+                            Err(err) => {
+                                warn!(
+                                    "运行时回查合集封面失败（将避免使用分集封面作为季封面）: collection_id={}, sid={}, err={}",
+                                    collection_source.id, collection_source.s_id, err
+                                );
                                 None
                             }
-                        },
-                        Ok(None) => {
-                            warn!("合集ID {} 在数据库中不存在", collection_source.id);
-                            None
-                        }
-                        Err(e) => {
-                            warn!("查询合集信息失败: {}", e);
-                            None
                         }
                     }
+                },
+                Ok(None) => {
+                    warn!("合集ID {} 在数据库中不存在", collection_source.id);
+                    None
                 }
-                _ => {
-                    // 非第一个视频，不需要重复获取
+                Err(e) => {
+                    warn!("查询合集信息失败: {}", e);
                     None
                 }
             }
@@ -4071,15 +4102,22 @@ pub async fn download_video_pages(
         None
     };
 
-    // up_seasonal「整合目录」下（投稿源 + 合集源），根目录 folder.jpg / poster.jpg 固定使用 UP 头像，
-    // 以便媒体库把该目录识别为同一UP主的统一入口。
+    let allow_collection_asset_video_cover_fallback = !(is_collection
+        && collection_use_season_structure
+        && season_folder.is_some()
+        && matches!(video_source, VideoSourceEnum::Collection(_)));
+
+    // 只有真正的“同UP整合目录”才把根目录 folder.jpg / poster.jpg 固定为 UP 头像：
+    // - 投稿源的同UP合集分季
+    // - 显式启用合集聚合的合集源
+    // 未启用聚合的独立合集源仍应使用合集封面，而不是 UP 头像。
     let use_upper_face_for_up_seasonal_root_assets = {
         let cfg = crate::config::reload_config();
         !is_bangumi
             && season_folder.is_some()
-            && (matches!(video_source, VideoSourceEnum::Submission(_))
-                || matches!(video_source, VideoSourceEnum::Collection(_)))
-            && (cfg.collection_folder_mode.as_ref() == "up_seasonal" || collection_aggregate_enabled)
+            && ((matches!(video_source, VideoSourceEnum::Submission(_))
+                && cfg.collection_folder_mode.as_ref() == "up_seasonal")
+                || collection_aggregate_enabled)
     };
     let root_assets_upper_face_url =
         if use_upper_face_for_up_seasonal_root_assets && !final_video_model.upper_face.trim().is_empty() {
@@ -4193,6 +4231,7 @@ pub async fn download_video_pages(
                     token.clone(),
                     season_thumb_url, // 使用横版封面作为thumb
                     None,             // 不使用fanart URL
+                    true,
                 ),
                 // Season01-fanart.jpg (竖版封面)
                 fetch_video_poster(
@@ -4204,6 +4243,7 @@ pub async fn download_video_pages(
                     token.clone(),
                     season_fanart_url, // 使用竖版封面作为fanart
                     None,              // 不使用fanart URL
+                    true,
                 ),
                 // Season01-poster.jpg (竖版封面)
                 fetch_bangumi_poster(
@@ -4213,6 +4253,7 @@ pub async fn download_video_pages(
                     season_poster_path,
                     token.clone(),
                     season_fanart_url, // 使用竖版封面作为主封面
+                    true,
                 ),
                 // folder.jpg (竖版封面，Emby优先识别)
                 fetch_bangumi_poster(
@@ -4222,6 +4263,7 @@ pub async fn download_video_pages(
                     folder_path,
                     token.clone(),
                     season_fanart_url, // 使用竖版封面
+                    true,
                 ),
                 // poster.jpg (竖版封面，通用封面)
                 fetch_bangumi_poster(
@@ -4231,6 +4273,7 @@ pub async fn download_video_pages(
                     generic_poster_path,
                     token.clone(),
                     season_fanart_url, // 使用竖版封面
+                    true,
                 )
             );
 
@@ -4399,6 +4442,7 @@ pub async fn download_video_pages(
             } else {
                 None
             },
+            allow_collection_asset_video_cover_fallback,
         ),
         // 下载番剧/多P/合集根目录的 poster.jpg（Emby兼容性）
         fetch_bangumi_poster(
@@ -4454,6 +4498,7 @@ pub async fn download_video_pages(
             } else {
                 None
             },
+            allow_collection_asset_video_cover_fallback,
         ),
         // 下载番剧/多P/合集根目录的 folder.jpg（Emby兼容性，优先级最高）
         fetch_bangumi_poster(
@@ -4509,6 +4554,7 @@ pub async fn download_video_pages(
             } else {
                 None
             },
+            allow_collection_asset_video_cover_fallback,
         ),
         // 下载 Up 主头像（番剧跳过，因为番剧没有UP主信息）
         fetch_upper_face(
@@ -7157,6 +7203,7 @@ pub async fn fetch_video_poster(
     token: CancellationToken,
     custom_cover_url: Option<&str>,
     custom_fanart_url: Option<&str>,
+    allow_video_cover_fallback: bool,
 ) -> Result<ExecutionStatus> {
     // 兜底修复：如果状态显示封面已完成但 fanart 文件缺失，则用已存在的 thumb 生成 fanart。
     if !should_run {
@@ -7175,7 +7222,19 @@ pub async fn fetch_video_poster(
     debug!("  custom_fanart_url: {:?}", custom_fanart_url);
 
     // 下载thumb封面（依赖should_run参数，重置状态后会强制重新下载）
-    let thumb_url = custom_cover_url.unwrap_or(video_model.cover.as_str());
+    let Some(thumb_url) = custom_cover_url.or_else(|| {
+        if allow_video_cover_fallback {
+            Some(video_model.cover.as_str())
+        } else {
+            None
+        }
+    }) else {
+        debug!(
+            "跳过封面下载：未提供稳定封面来源，且当前场景禁止回退为分集封面。视频：{}",
+            video_model.name
+        );
+        return Ok(ExecutionStatus::Skipped);
+    };
     let urls = vec![thumb_url];
     tokio::select! {
         biased;
@@ -7400,6 +7459,7 @@ pub async fn fetch_bangumi_poster(
     poster_path: PathBuf,
     token: CancellationToken,
     custom_poster_url: Option<&str>,
+    allow_video_cover_fallback: bool,
 ) -> Result<ExecutionStatus> {
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
@@ -7433,7 +7493,19 @@ pub async fn fetch_bangumi_poster(
     // 下载 poster.jpg 文件（依赖should_run参数，重置状态后会强制重新下载）
     ensure_parent_dir_for_file(&poster_path).await?;
 
-    let poster_url = custom_poster_url.unwrap_or(video_model.cover.as_str());
+    let Some(poster_url) = custom_poster_url.or_else(|| {
+        if allow_video_cover_fallback {
+            Some(video_model.cover.as_str())
+        } else {
+            None
+        }
+    }) else {
+        debug!(
+            "跳过主封面下载：未提供稳定封面来源，且当前场景禁止回退为分集封面。视频：{}",
+            video_model.name
+        );
+        return Ok(ExecutionStatus::Skipped);
+    };
     let urls = vec![poster_url];
 
     let max_attempts = if skip_if_exists { 3 } else { 1 };

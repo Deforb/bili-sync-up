@@ -2,7 +2,7 @@ use anyhow::Result;
 use bili_sync_migration::{Migrator, MigratorTrait};
 use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sea_orm::sqlx::{self, Executor};
-use sea_orm::{DatabaseConnection, SqlxSqliteConnector};
+use sea_orm::{ConnectionTrait, DatabaseConnection, SqlxSqliteConnector};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tracing::debug;
@@ -98,6 +98,7 @@ async fn migrate_database() -> Result<()> {
 
     // 确保所有迁移都应用
     Migrator::up(&connection, None).await?;
+    auto_compact_image_proxy_cache(&connection).await?;
 
     // 显式关闭连接池，确保释放所有数据库锁
     pool.close().await;
@@ -107,6 +108,111 @@ async fn migrate_database() -> Result<()> {
 }
 
 /// 确保 page 表有 ai_renamed 字段
+async fn auto_compact_image_proxy_cache(connection: &DatabaseConnection) -> Result<()> {
+    const MIN_FREE_PAGES_FOR_VACUUM: i64 = 8192; // ~32MB when page_size=4KB
+    const MIN_FREE_RATIO_FOR_VACUUM: f64 = 0.20;
+
+    let backend = connection.get_database_backend();
+    let table_exists_sql =
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='image_proxy_cache'";
+    let table_exists = connection
+        .query_one(sea_orm::Statement::from_string(backend, table_exists_sql))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .unwrap_or(0)
+        >= 1;
+    if !table_exists {
+        return Ok(());
+    }
+
+    if sqlite_table_has_column(connection, "image_proxy_cache", "image_data").await? {
+        connection
+            .execute(sea_orm::Statement::from_string(
+                backend,
+                "UPDATE image_proxy_cache SET image_data = X'' WHERE length(image_data) > 0",
+            ))
+            .await?;
+    }
+
+    let freelist_count = connection
+        .query_one(sea_orm::Statement::from_string(
+            backend,
+            "PRAGMA freelist_count",
+        ))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .unwrap_or(0);
+    let page_count = connection
+        .query_one(sea_orm::Statement::from_string(backend, "PRAGMA page_count"))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .unwrap_or(0);
+    let page_size = connection
+        .query_one(sea_orm::Statement::from_string(backend, "PRAGMA page_size"))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .unwrap_or(4096);
+
+    if page_count <= 0 {
+        return Ok(());
+    }
+
+    let free_ratio = freelist_count as f64 / page_count as f64;
+    let reclaimable_mb = freelist_count.saturating_mul(page_size) / (1024 * 1024);
+    if freelist_count < MIN_FREE_PAGES_FOR_VACUUM && free_ratio < MIN_FREE_RATIO_FOR_VACUUM {
+        debug!(
+            "跳过自动VACUUM: freelist_count={}, page_count={}, free_ratio={:.2}%, reclaimable={}MB",
+            freelist_count,
+            page_count,
+            free_ratio * 100.0,
+            reclaimable_mb
+        );
+        return Ok(());
+    }
+
+    info!(
+        "触发自动VACUUM: freelist_count={}, page_count={}, free_ratio={:.2}%, reclaimable={}MB",
+        freelist_count,
+        page_count,
+        free_ratio * 100.0,
+        reclaimable_mb
+    );
+
+    if let Err(e) = connection
+        .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE)")
+        .await
+    {
+        debug!("自动VACUUM前WAL checkpoint失败（继续尝试VACUUM）: {}", e);
+    }
+
+    if let Err(e) = connection.execute_unprepared("VACUUM").await {
+        warn!("自动VACUUM执行失败（不影响启动）: {}", e);
+        return Ok(());
+    }
+
+    info!("自动VACUUM执行完成");
+    Ok(())
+}
+
+async fn sqlite_table_has_column(
+    connection: &DatabaseConnection,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool> {
+    let backend = connection.get_database_backend();
+    let sql = format!(
+        "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'",
+        table_name.replace('\'', "''"),
+        column_name.replace('\'', "''")
+    );
+    let count = connection
+        .query_one(sea_orm::Statement::from_string(backend, sql))
+        .await?
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .unwrap_or(0);
+    Ok(count >= 1)
+}
+
 async fn ensure_ai_renamed_column(connection: &DatabaseConnection) -> Result<()> {
     use sea_orm::ConnectionTrait;
 

@@ -46,7 +46,15 @@
 	let filteredLogs: LogEntry[] = [];
 	let isLoading = false;
 	let autoRefresh = true;
-	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+	let logFilesRefreshInterval: ReturnType<typeof setInterval> | null = null;
+	let logsEventSource: EventSource | null = null;
+	let liveStreamStatus: 'idle' | 'connecting' | 'connected' | 'error' = 'idle';
+	let pendingLiveCount = 0;
+	let pendingLiveLogs: LogEntry[] = [];
+	let pendingLiveNeedsReload = false;
+	let logsContainer: HTMLDivElement | null = null;
+	let isLogsPaneHovered = false;
+	let isLogsSelectionActive = false;
 	let currentTab = 'all';
 	let isAuthenticated = false;
 	let authError = '';
@@ -172,6 +180,183 @@
 		return defaultResponse;
 	}
 
+	function getCurrentLevelFilter(): LogLevel | undefined {
+		return currentTab === 'all' ? undefined : (currentTab as LogLevel);
+	}
+
+	function buildLogsStreamUrl(level?: LogLevel): string | null {
+		const token = localStorage.getItem('auth_token');
+		if (!token) return null;
+
+		const params = new URLSearchParams();
+		params.append('token', token);
+		if (level) {
+			params.append('level', level);
+		}
+		return `/api/logs/stream?${params.toString()}`;
+	}
+
+	function stopLogsStream() {
+		if (logsEventSource) {
+			logsEventSource.close();
+			logsEventSource = null;
+		}
+		liveStreamStatus = 'idle';
+	}
+
+	function hasSelectionInsideLogs(): boolean {
+		if (!logsContainer) return false;
+		const selection = window.getSelection();
+		if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+
+		const anchorNode = selection.anchorNode;
+		const focusNode = selection.focusNode;
+		return Boolean(
+			(anchorNode && logsContainer.contains(anchorNode)) ||
+				(focusNode && logsContainer.contains(focusNode))
+		);
+	}
+
+	function shouldDeferLiveApply(): boolean {
+		return isLogsPaneHovered || isLogsSelectionActive;
+	}
+
+	function flushPendingLiveLogs() {
+		if (currentPage !== 1 || pendingLiveCount === 0) {
+			return;
+		}
+
+		if (pendingLiveNeedsReload) {
+			pendingLiveLogs = [];
+			pendingLiveNeedsReload = false;
+			void loadLogs(getCurrentLevelFilter(), 1);
+			return;
+		}
+
+		if (pendingLiveLogs.length === 0) {
+			pendingLiveCount = 0;
+			return;
+		}
+
+		const bufferedLogs = [...pendingLiveLogs].reverse();
+		logs = [...bufferedLogs, ...logs].slice(0, perPage);
+		pendingLiveLogs = [];
+		pendingLiveCount = 0;
+		filterLogs();
+	}
+
+	function updateLogsSelectionState() {
+		isLogsSelectionActive = hasSelectionInsideLogs();
+		if (!shouldDeferLiveApply()) {
+			flushPendingLiveLogs();
+		}
+	}
+
+	function handleLogsMouseEnter() {
+		isLogsPaneHovered = true;
+	}
+
+	function handleLogsMouseLeave() {
+		isLogsPaneHovered = false;
+		updateLogsSelectionState();
+	}
+
+	async function handlePendingLiveClick() {
+		if (currentPage !== 1) {
+			await loadLogs(getCurrentLevelFilter(), 1);
+			return;
+		}
+
+		flushPendingLiveLogs();
+	}
+
+	function applyIncomingLog(entry: LogEntry) {
+		if (currentPage === 1) {
+			totalLogCount += 1;
+			totalPages = Math.max(1, Math.ceil(totalLogCount / perPage));
+
+			if (shouldDeferLiveApply()) {
+				pendingLiveLogs.push(entry);
+				pendingLiveCount += 1;
+				return;
+			}
+
+			logs = [entry, ...logs].slice(0, perPage);
+			filterLogs();
+			return;
+		}
+
+		pendingLiveCount += 1;
+		totalLogCount += 1;
+		totalPages = Math.max(1, Math.ceil(totalLogCount / perPage));
+	}
+
+	function startLogsStream() {
+		if (!autoRefresh || !isAuthenticated) return;
+
+		const streamUrl = buildLogsStreamUrl(getCurrentLevelFilter());
+		if (!streamUrl) return;
+
+		stopLogsStream();
+		liveStreamStatus = 'connecting';
+
+		const eventSource = new EventSource(streamUrl);
+		logsEventSource = eventSource;
+
+		eventSource.addEventListener('ready', () => {
+			liveStreamStatus = 'connected';
+		});
+
+		eventSource.addEventListener('log', (event) => {
+			try {
+				const entry = JSON.parse((event as MessageEvent).data) as LogEntry;
+				applyIncomingLog(entry);
+			} catch (error) {
+				console.error('解析实时日志失败:', error);
+			}
+		});
+
+		eventSource.addEventListener('lagged', () => {
+			if (currentPage === 1) {
+				if (shouldDeferLiveApply()) {
+					pendingLiveNeedsReload = true;
+					pendingLiveCount = Math.max(pendingLiveCount, 1);
+					return;
+				}
+				void loadLogs(getCurrentLevelFilter(), 1);
+				return;
+			}
+			pendingLiveCount = Math.max(pendingLiveCount, 1);
+		});
+
+		eventSource.onerror = () => {
+			if (!autoRefresh) return;
+			liveStreamStatus = 'error';
+		};
+	}
+
+	function startAutoRefresh() {
+		startLogsStream();
+		if (!logFilesRefreshInterval) {
+			logFilesRefreshInterval = setInterval(() => {
+				void loadLogFiles();
+			}, 15000);
+		}
+	}
+
+	function stopAutoRefresh() {
+		stopLogsStream();
+		if (logFilesRefreshInterval) {
+			clearInterval(logFilesRefreshInterval);
+			logFilesRefreshInterval = null;
+		}
+	}
+
+	function restartLogsStream() {
+		if (!autoRefresh) return;
+		startLogsStream();
+	}
+
 	// 初始化面包屑
 	onMount(async () => {
 		setBreadcrumb([
@@ -189,15 +374,16 @@
 
 			// 设置自动刷新
 			if (autoRefresh) {
-				refreshInterval = setInterval(() => handleRefresh(), 5000); // 每5秒刷新一次
+				startAutoRefresh();
 			}
 		}
+
+		document.addEventListener('selectionchange', updateLogsSelectionState);
 	});
 
 	onDestroy(() => {
-		if (!refreshInterval) return;
-		clearInterval(refreshInterval);
-		refreshInterval = null;
+		document.removeEventListener('selectionchange', updateLogsSelectionState);
+		stopAutoRefresh();
 	});
 
 	// 加载日志
@@ -257,6 +443,9 @@
 		currentPage = parsed.page;
 		totalPages = parsed.total_pages;
 		perPage = parsed.per_page;
+		pendingLiveCount = 0;
+		pendingLiveLogs = [];
+		pendingLiveNeedsReload = false;
 
 		filterLogs();
 	}
@@ -389,11 +578,9 @@
 	function toggleAutoRefresh() {
 		autoRefresh = !autoRefresh;
 		if (autoRefresh) {
-			refreshInterval = setInterval(() => handleRefresh(), 5000);
+			startAutoRefresh();
 		} else {
-			if (!refreshInterval) return;
-			clearInterval(refreshInterval);
-			refreshInterval = null;
+			stopAutoRefresh();
 		}
 	}
 
@@ -607,7 +794,38 @@
 		<!-- 页面标题和操作按钮 -->
 		<div class="flex {isMobile ? 'flex-col gap-4' : 'items-center justify-between'}">
 			<div>
-				<h1 class="text-3xl font-bold tracking-tight">系统日志</h1>
+				<div class="flex flex-wrap items-center gap-2">
+					<h1 class="text-3xl font-bold tracking-tight">系统日志</h1>
+					<Badge
+						variant="outline"
+						class={liveStreamStatus === 'connected'
+							? 'border-green-200 bg-green-50 text-green-700'
+							: liveStreamStatus === 'connecting'
+								? 'border-blue-200 bg-blue-50 text-blue-700'
+								: liveStreamStatus === 'error'
+									? 'border-yellow-200 bg-yellow-50 text-yellow-700'
+									: 'border-muted-foreground/20 text-muted-foreground'}
+					>
+						{#if liveStreamStatus === 'connected'}
+							实时推送已连接
+						{:else if liveStreamStatus === 'connecting'}
+							实时推送连接中
+						{:else if liveStreamStatus === 'error'}
+							实时推送重连中
+						{:else}
+							实时推送未开启
+						{/if}
+					</Badge>
+					{#if pendingLiveCount > 0}
+						<Button variant="ghost" size="sm" class="h-7 px-2 text-xs" onclick={handlePendingLiveClick}>
+							{#if currentPage === 1}
+								当前有 {pendingLiveCount} 条新日志，点击更新查看
+							{:else}
+								当前页外有 {pendingLiveCount} 条新日志，点击跳到第一页查看
+							{/if}
+						</Button>
+					{/if}
+				</div>
 				<p class="text-muted-foreground">查看系统运行日志和错误信息</p>
 				{#if authError}
 					<p class="mt-1 text-sm text-red-600">{authError}</p>
@@ -675,7 +893,7 @@
 						? 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100'
 						: ''}
 				>
-					{autoRefresh ? '自动刷新中' : '开启自动刷新'}
+					{autoRefresh ? '实时推送中' : '开启实时推送'}
 				</Button>
 
 				<Button
@@ -715,6 +933,7 @@
 						currentTab = 'all';
 						currentPage = 1;
 						loadLogs();
+						restartLogsStream();
 					}}
 				>
 					全部日志
@@ -728,6 +947,7 @@
 						currentTab = 'info';
 						currentPage = 1;
 						loadLogs('info', 1);
+						restartLogsStream();
 					}}
 				>
 					信息
@@ -741,6 +961,7 @@
 						currentTab = 'warn';
 						currentPage = 1;
 						loadLogs('warn', 1);
+						restartLogsStream();
 					}}
 				>
 					警告
@@ -754,6 +975,7 @@
 						currentTab = 'error';
 						currentPage = 1;
 						loadLogs('error', 1);
+						restartLogsStream();
 					}}
 				>
 					错误
@@ -767,6 +989,7 @@
 						currentTab = 'debug';
 						currentPage = 1;
 						loadLogs('debug', 1);
+						restartLogsStream();
 					}}
 				>
 					调试
@@ -795,7 +1018,15 @@
 					</Card.Description>
 				</Card.Header>
 				<Card.Content class="p-0">
-					<div class="h-[600px] overflow-auto">
+					<div
+						bind:this={logsContainer}
+						class="h-[600px] overflow-auto"
+						role="log"
+						aria-label="系统日志列表"
+						aria-live="off"
+						on:mouseenter={handleLogsMouseEnter}
+						on:mouseleave={handleLogsMouseLeave}
+					>
 						{#if filteredLogs.length === 0}
 							<div class="text-muted-foreground flex h-32 items-center justify-center">
 								{isLoading ? '加载中...' : '暂无日志'}

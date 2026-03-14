@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{convert::Infallible, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Context, Result};
 use axum::extract::{Extension, Json, Path, Query};
 use axum::http::{header::IF_NONE_MATCH, HeaderMap};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use chrono::{DateTime, Datelike, Utc};
 use html_escape::decode_html_entities;
 
@@ -10252,6 +10254,59 @@ pub fn add_log_entry(level: LogLevel, message: String, target: Option<String>) {
     let _ = LOG_BROADCASTER.send(entry);
 }
 
+fn parse_log_level_filter(level: Option<&String>) -> Option<LogLevel> {
+    level.and_then(|l| match l.as_str() {
+        "info" => Some(LogLevel::Info),
+        "warn" => Some(LogLevel::Warn),
+        "error" => Some(LogLevel::Error),
+        "debug" => Some(LogLevel::Debug),
+        _ => None,
+    })
+}
+
+fn log_entry_matches_filter(entry: &LogEntry, level_filter: Option<&LogLevel>) -> bool {
+    match level_filter {
+        Some(filter_level) => &entry.level == filter_level,
+        None => entry.level != LogLevel::Debug,
+    }
+}
+
+pub async fn stream_logs(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let level_filter = parse_log_level_filter(params.get("level"));
+    let mut receiver = LOG_BROADCASTER.subscribe();
+
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("ready").data("connected"));
+
+        loop {
+            match receiver.recv().await {
+                Ok(entry) => {
+                    if !log_entry_matches_filter(&entry, level_filter.as_ref()) {
+                        continue;
+                    }
+
+                    match serde_json::to_string(&entry) {
+                        Ok(payload) => yield Ok(Event::default().event("log").data(payload)),
+                        Err(err) => warn!("序列化实时日志失败: {}", err),
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    yield Ok(Event::default().event("lagged").data(skipped.to_string()));
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(StdDuration::from_secs(15))
+            .text("keepalive"),
+    )
+}
+
 /// 获取历史日志
 #[utoipa::path(
     get,
@@ -10269,13 +10324,7 @@ pub fn add_log_entry(level: LogLevel, message: String, target: Option<String>) {
 pub async fn get_logs(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<ApiResponse<LogsResponse>, ApiError> {
-    let level_filter = params.get("level").and_then(|l| match l.as_str() {
-        "info" => Some(LogLevel::Info),
-        "warn" => Some(LogLevel::Warn),
-        "error" => Some(LogLevel::Error),
-        "debug" => Some(LogLevel::Debug),
-        _ => None,
-    });
+    let level_filter = parse_log_level_filter(params.get("level"));
 
     let limit = params
         .get("limit")

@@ -40,6 +40,7 @@ use crate::api::handler::{
     get_latest_ingests,
     get_log_files,
     get_logs,
+    stream_logs,
     get_notification_config,
     get_notification_status,
     get_queue_status,
@@ -245,6 +246,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/user/subscribed-collections", get(get_subscribed_collections))
         .route("/api/submission/{up_id}/videos", get(get_submission_videos))
         .route("/api/logs", get(get_logs))
+        .route("/api/logs/stream", get(stream_logs))
         .route("/api/logs/files", get(get_log_files))
         .route("/api/logs/download", get(download_log_file))
         .route("/api/queue-status", get(get_queue_status))

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::extract::Request;
 use axum::http::HeaderMap;
 use axum::middleware::Next;
@@ -36,6 +38,17 @@ pub async fn auth(headers: HeaderMap, request: Request, next: Next) -> Result<Re
 
     let current_config = crate::config::reload_config();
     let token = current_config.auth_token.as_deref().unwrap_or("");
+
+    if path.starts_with("/api/logs/stream")
+        && request
+            .uri()
+            .query()
+            .and_then(|query| serde_urlencoded::from_str::<HashMap<String, String>>(query).ok())
+            .and_then(|params| params.get("token").cloned())
+            .is_some_and(|query_token| query_token == token)
+    {
+        return Ok(next.run(request).await);
+    }
 
     // 检查标准的Authorization头
     if headers

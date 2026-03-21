@@ -118,12 +118,29 @@ fn is_submission_first_page_empty_error(err: &anyhow::Error) -> bool {
     error_text.contains("no medias found in upper") && error_text.contains("page 1")
 }
 
+fn is_collection_not_found_error(err: &anyhow::Error) -> bool {
+    let error_text = format!("{:#}", err).to_lowercase();
+    (error_text.contains("status code: -404") || error_text.contains("not found"))
+        && (error_text.contains("啥都木有") || error_text.contains("not found"))
+}
+
+fn is_watch_later_empty_error(err: &anyhow::Error) -> bool {
+    let error_text = format!("{:#}", err);
+    error_text.contains("No videos found in watch later list")
+}
+
+async fn send_source_status_notification(title: &str, message: &str, context: Option<&str>) {
+    if let Err(notify_err) = crate::utils::notification::send_error_notification(title, message, context).await {
+        warn!("发送通知失败: {}", notify_err);
+    }
+}
+
 async fn try_disable_cancelled_submission_source(
     connection: &DatabaseConnection,
     bili_client: &BiliClient,
     source: &VideoSourceWithId,
     err: &anyhow::Error,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, String)>> {
     if source.source_type != SourceType::Submission || !is_submission_first_page_empty_error(err) {
         return Ok(None);
     }
@@ -189,7 +206,31 @@ async fn try_disable_cancelled_submission_source(
     active.next_scan_at = Set(None);
     active.update(connection).await?;
 
-    Ok(Some(format!("{}（{}）", resolved_name, disable_reason)))
+    Ok(Some((resolved_name, disable_reason.to_string())))
+}
+
+async fn try_disable_invalid_collection_source(
+    connection: &DatabaseConnection,
+    source: &VideoSourceWithId,
+    err: &anyhow::Error,
+) -> Result<Option<(String, String)>> {
+    if source.source_type != SourceType::Collection || !is_collection_not_found_error(err) {
+        return Ok(None);
+    }
+
+    let Some(model) = entities::collection::Entity::find_by_id(source.id)
+        .one(connection)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let source_name = model.name.clone();
+    let mut active: entities::collection::ActiveModel = model.into();
+    active.enabled = Set(false);
+    active.update(connection).await?;
+
+    Ok(Some((source_name, "合集已失效".to_string())))
 }
 
 /// 从数据库加载所有视频源的函数
@@ -888,6 +929,19 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                         // mmap自动处理数据持久化，不需要手动同步
                     }
                     Err(e) => {
+                        if source.source_type == SourceType::WatchLater && is_watch_later_empty_error(&e) {
+                            processed_sources += 1;
+                            last_successful_source = Some(source);
+                            info!("稍后再看该源为空，已跳过本轮扫描并发送通知");
+                            send_source_status_notification(
+                                "视频源为空",
+                                "稍后再看该源为空",
+                                Some("该源当前没有任何视频，已跳过本轮扫描。"),
+                            )
+                            .await;
+                            continue;
+                        }
+
                         let classified_error = crate::error::ErrorClassifier::classify_error(&e);
 
                         match try_disable_cancelled_submission_source(
@@ -898,15 +952,42 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                         )
                         .await
                         {
-                            Ok(Some(source_name)) => {
+                            Ok(Some((source_name, disable_reason))) => {
                                 processed_sources += 1;
                                 last_successful_source = Some(source);
-                                info!("检测到不可扫描UP主投稿源「{}」，已自动停用该源", source_name);
+                                info!("检测到不可扫描UP主投稿源「{}」（{}），已自动停用该源", source_name, disable_reason);
+                                let notification_context =
+                                    format!("检测到账号已注销、已封禁或无视频投稿（{}）。", disable_reason);
+                                send_source_status_notification(
+                                    "视频源自动停用",
+                                    &format!("UP主投稿源「{}」已自动停用", source_name),
+                                    Some(notification_context.as_str()),
+                                )
+                                .await;
                                 continue;
                             }
                             Ok(None) => {}
                             Err(disable_err) => {
                                 warn!("自动停用不可扫描UP主投稿源失败 (ID: {}): {}", source.id, disable_err);
+                            }
+                        }
+
+                        match try_disable_invalid_collection_source(&optimized_connection, source, &e).await {
+                            Ok(Some((source_name, disable_reason))) => {
+                                processed_sources += 1;
+                                last_successful_source = Some(source);
+                                info!("检测到不可扫描合集源「{}」（{}），已自动停用该源", source_name, disable_reason);
+                                send_source_status_notification(
+                                    "视频源自动停用",
+                                    &format!("合集源「{}」已自动停用", source_name),
+                                    Some("检测到合集已被删除、隐藏或已不存在。"),
+                                )
+                                .await;
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(disable_err) => {
+                                warn!("自动停用不可扫描合集源失败 (ID: {}): {}", source.id, disable_err);
                             }
                         }
 

@@ -133,8 +133,8 @@
 	let blacklistKeywords: string[] = [];
 	let whitelistKeywords: string[] = [];
 	let keywordCaseSensitive = true; // 是否区分大小写
-	let minDurationSeconds = '';
-	let maxDurationSeconds = '';
+	let minDurationSeconds: string | number = '';
+	let maxDurationSeconds: string | number = '';
 	let publishedAfter = '';
 	let publishedBefore = '';
 	let newBlacklistKeyword = '';
@@ -578,8 +578,18 @@
 		whitelistKeywords = whitelistKeywords.filter((_, i) => i !== index);
 	}
 
-	function parseDurationInput(value: string, fieldName: string): number | null {
-		const trimmed = value.trim();
+	function normalizeDurationInput(value: string | number | null | undefined): string {
+		if (value === null || value === undefined) {
+			return '';
+		}
+		return String(value).trim();
+	}
+
+	function parseDurationInput(
+		value: string | number | null | undefined,
+		fieldName: string
+	): number | null {
+		const trimmed = normalizeDurationInput(value);
 		if (!trimmed) {
 			return null;
 		}
@@ -594,8 +604,8 @@
 			blacklistKeywords.length > 0 ||
 			whitelistKeywords.length > 0 ||
 			!keywordCaseSensitive ||
-			minDurationSeconds.trim() !== '' ||
-			maxDurationSeconds.trim() !== '' ||
+			normalizeDurationInput(minDurationSeconds) !== '' ||
+			normalizeDurationInput(maxDurationSeconds) !== '' ||
 			!!publishedAfter ||
 			!!publishedBefore
 		);
@@ -603,8 +613,8 @@
 
 	function getActiveFilterCount() {
 		let count = blacklistKeywords.length + whitelistKeywords.length;
-		if (minDurationSeconds.trim()) count += 1;
-		if (maxDurationSeconds.trim()) count += 1;
+		if (normalizeDurationInput(minDurationSeconds)) count += 1;
+		if (normalizeDurationInput(maxDurationSeconds)) count += 1;
 		if (publishedAfter) count += 1;
 		if (publishedBefore) count += 1;
 		return count;

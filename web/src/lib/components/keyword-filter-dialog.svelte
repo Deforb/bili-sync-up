@@ -31,8 +31,8 @@
 	let blacklistKeywords: string[] = [];
 	let whitelistKeywords: string[] = [];
 	let caseSensitive: boolean = true;
-	let minDurationSeconds = '';
-	let maxDurationSeconds = '';
+	let minDurationSeconds: string | number = '';
+	let maxDurationSeconds: string | number = '';
 	let publishedAfter = '';
 	let publishedBefore = '';
 	let newBlacklistKeyword = '';
@@ -144,8 +144,18 @@
 		return null;
 	}
 
-	function parseDurationInput(value: string, fieldName: string): number | null {
-		const trimmed = value.trim();
+	function normalizeDurationInput(value: string | number | null | undefined): string {
+		if (value === null || value === undefined) {
+			return '';
+		}
+		return String(value).trim();
+	}
+
+	function parseDurationInput(
+		value: string | number | null | undefined,
+		fieldName: string
+	): number | null {
+		const trimmed = normalizeDurationInput(value);
 		if (!trimmed) {
 			return null;
 		}

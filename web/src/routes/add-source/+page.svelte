@@ -484,6 +484,7 @@
 
 	// 添加黑名单关键词
 	async function addBlacklistKeyword() {
+		advancedFilterValidationError = '';
 		const pattern = newBlacklistKeyword.trim();
 		if (!pattern) {
 			blacklistValidationError = '请输入关键词';
@@ -527,6 +528,7 @@
 
 	// 添加白名单关键词
 	async function addWhitelistKeyword() {
+		advancedFilterValidationError = '';
 		const pattern = newWhitelistKeyword.trim();
 		if (!pattern) {
 			whitelistValidationError = '请输入关键词';
@@ -582,6 +584,9 @@
 		if (value === null || value === undefined) {
 			return '';
 		}
+		if (typeof value === 'number' && !Number.isFinite(value)) {
+			return '';
+		}
 		return String(value).trim();
 	}
 
@@ -589,6 +594,16 @@
 		value: string | number | null | undefined,
 		fieldName: string
 	): number | null {
+		if (typeof value === 'number') {
+			if (!Number.isFinite(value)) {
+				return null;
+			}
+			if (!Number.isInteger(value) || value < 0) {
+				throw new Error(`${fieldName}必须为非负整数秒数`);
+			}
+			return value;
+		}
+
 		const trimmed = normalizeDurationInput(value);
 		if (!trimmed) {
 			return null;
@@ -624,6 +639,7 @@
 	function handleBlacklistKeywordKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			event.stopPropagation();
 			addBlacklistKeyword();
 		}
 	}
@@ -632,11 +648,18 @@
 	function handleWhitelistKeywordKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			event.stopPropagation();
 			addWhitelistKeyword();
 		}
 	}
 
-	async function handleSubmit() {
+	async function handleSubmit(submitEvent?: SubmitEvent) {
+		const submitter = submitEvent?.submitter as HTMLElement | null | undefined;
+		const submitterIntent = submitter?.dataset?.submitIntent || null;
+		if (submitterIntent !== 'add-source-submit') {
+			return;
+		}
+
 		advancedFilterValidationError = '';
 
 		let parsedMinDuration: number | null = null;
@@ -2307,10 +2330,10 @@
 				<!-- 左侧：表单区域 -->
 				<div class={isCompactLayout ? 'w-full' : 'max-w-[500px] min-w-[350px] flex-1'}>
 					<form
-						onsubmit={(e) => {
-							e.preventDefault();
-							handleSubmit();
-						}}
+							onsubmit={(e) => {
+								e.preventDefault();
+								handleSubmit(e as SubmitEvent);
+							}}
 						class="space-y-6"
 					>
 						<!-- 视频源类型 -->
@@ -3407,7 +3430,11 @@
 												<Button
 													type="button"
 													size="sm"
-													onclick={addWhitelistKeyword}
+													onclick={(event) => {
+														event.preventDefault();
+														event.stopPropagation();
+														addWhitelistKeyword();
+													}}
 													disabled={!newWhitelistKeyword.trim() || validatingWhitelistKeyword}
 													class="h-8 bg-green-600 px-2 text-xs hover:bg-green-700"
 												>
@@ -3471,7 +3498,11 @@
 												<Button
 													type="button"
 													size="sm"
-													onclick={addBlacklistKeyword}
+													onclick={(event) => {
+														event.preventDefault();
+														event.stopPropagation();
+														addBlacklistKeyword();
+													}}
 													disabled={!newBlacklistKeyword.trim() || validatingBlacklistKeyword}
 													class="h-8 bg-red-600 px-2 text-xs hover:bg-red-700"
 												>
@@ -3543,7 +3574,12 @@
 
 						<!-- 提交按钮 -->
 						<div class="flex {isMobile ? 'flex-col' : ''} gap-2">
-							<Button type="submit" disabled={loading || batchMode} class={isMobile ? 'w-full' : ''}>
+							<Button
+								type="submit"
+								data-submit-intent="add-source-submit"
+								disabled={loading || batchMode}
+								class={isMobile ? 'w-full' : ''}
+							>
 								{loading ? '添加中...' : '添加'}
 							</Button>
 							<Button
@@ -5022,6 +5058,9 @@
 			</div>
 		</div>
 	</div>
+{/if}
+
+{#if debugPanelEnabled}
 {/if}
 
 <style>

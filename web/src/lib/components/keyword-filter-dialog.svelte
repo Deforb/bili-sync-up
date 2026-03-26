@@ -85,11 +85,11 @@
 				whitelistKeywords = response.data.whitelist_keywords || [];
 				caseSensitive = response.data.case_sensitive ?? true;
 				minDurationSeconds =
-					response.data.min_duration_seconds !== undefined
+					response.data.min_duration_seconds != null
 						? String(response.data.min_duration_seconds)
 						: '';
 				maxDurationSeconds =
-					response.data.max_duration_seconds !== undefined
+					response.data.max_duration_seconds != null
 						? String(response.data.max_duration_seconds)
 						: '';
 				publishedAfter = response.data.published_after || '';
@@ -148,6 +148,9 @@
 		if (value === null || value === undefined) {
 			return '';
 		}
+		if (typeof value === 'number' && !Number.isFinite(value)) {
+			return '';
+		}
 		return String(value).trim();
 	}
 
@@ -155,6 +158,16 @@
 		value: string | number | null | undefined,
 		fieldName: string
 	): number | null {
+		if (typeof value === 'number') {
+			if (!Number.isFinite(value)) {
+				return null;
+			}
+			if (!Number.isInteger(value) || value < 0) {
+				throw new Error(`${fieldName}必须为非负整数秒数`);
+			}
+			return value;
+		}
+
 		const trimmed = normalizeDurationInput(value);
 		if (!trimmed) {
 			return null;
@@ -169,6 +182,7 @@
 
 	// 添加黑名单关键词
 	async function addBlacklistKeyword() {
+		advancedValidationError = '';
 		const pattern = newBlacklistKeyword.trim();
 		if (!pattern) {
 			blacklistValidationError = '请输入关键词';
@@ -201,6 +215,7 @@
 
 	// 添加白名单关键词
 	async function addWhitelistKeyword() {
+		advancedValidationError = '';
 		const pattern = newWhitelistKeyword.trim();
 		if (!pattern) {
 			whitelistValidationError = '请输入关键词';
@@ -311,6 +326,7 @@
 	function handleBlacklistKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			event.stopPropagation();
 			addBlacklistKeyword();
 		}
 	}
@@ -319,6 +335,7 @@
 	function handleWhitelistKeydown(event: KeyboardEvent) {
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			event.stopPropagation();
 			addWhitelistKeyword();
 		}
 	}

@@ -127,8 +127,8 @@ impl VideoSource for watch_later::Model {
         self.audio_only_m4a_only
     }
 
-    fn flat_folder(&self) -> bool {
-        self.flat_folder
+    fn folder_mode(&self) -> i32 {
+        crate::utils::folder_mode::normalize_folder_mode(self.folder_mode)
     }
 
     fn download_danmaku(&self) -> bool {

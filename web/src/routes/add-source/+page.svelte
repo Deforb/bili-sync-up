@@ -24,7 +24,8 @@
 		ValidateFavoriteResponse,
 		UserCollectionInfo,
 		AddVideoSourceRequest,
-		KeywordFilterMode
+		KeywordFilterMode,
+		FolderMode
 	} from '$lib/types';
 	import {
 		Search,
@@ -56,7 +57,7 @@
 	// 下载选项
 	let audioOnly = false; // 仅下载音频
 	let audioOnlyM4aOnly = false; // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
-	let flatFolder = false; // 平铺目录模式
+	let folderMode: FolderMode = 'normal'; // 目录模式
 	let downloadDanmaku = true; // 下载弹幕（默认开启）
 	let downloadSubtitle = true; // 下载字幕（默认开启）
 	let useDynamicApi = false; // 投稿源：使用动态API
@@ -729,7 +730,8 @@
 			// 下载选项
 			audio_only: audioOnly,
 			audio_only_m4a_only: audioOnlyM4aOnly,
-			flat_folder: flatFolder,
+			folder_mode: folderMode,
+			flat_folder: folderMode === 'flat',
 			download_danmaku: downloadDanmaku,
 			download_subtitle: downloadSubtitle,
 			use_dynamic_api: useDynamicApi,
@@ -885,7 +887,7 @@
 			// 重置下载选项
 			audioOnly = false;
 			audioOnlyM4aOnly = false;
-			flatFolder = false;
+			folderMode = 'normal';
 			downloadDanmaku = true;
 			downloadSubtitle = true;
 			useDynamicApi = false;
@@ -2865,7 +2867,7 @@
 									</div>
 								{/if}
 
-								<!-- 平铺目录模式 -->
+								<!-- 目录模式 -->
 								<div
 									class="flex items-center justify-between rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700"
 								>
@@ -2885,19 +2887,21 @@
 										</svg>
 										<div>
 											<span class="text-xs font-medium text-gray-700 dark:text-gray-300"
-												>平铺目录</span
+												>目录模式</span
 											>
 											<p class="text-[10px] text-gray-500 dark:text-gray-400">
-												所有文件直接放入根目录，不创建子文件夹
+												normal: 标准目录；flat: 全平铺；weak_flat: 仅单P平铺
 											</p>
 										</div>
 									</div>
-									<label class="relative inline-flex cursor-pointer items-center">
-										<input type="checkbox" bind:checked={flatFolder} class="peer sr-only" />
-										<div
-											class="peer h-5 w-9 rounded-full bg-gray-300 peer-checked:bg-purple-600 peer-focus:ring-2 peer-focus:ring-purple-500 peer-focus:outline-none after:absolute after:top-[2px] after:left-[2px] after:h-4 after:w-4 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white dark:bg-gray-600 dark:peer-checked:bg-purple-500"
-										></div>
-									</label>
+									<select
+										bind:value={folderMode}
+										class="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+									>
+										<option value="normal">normal（标准）</option>
+										<option value="flat">flat（全平铺）</option>
+										<option value="weak_flat">weak_flat（弱平铺）</option>
+									</select>
 								</div>
 
 								<!-- 动态API（仅UP主投稿） -->

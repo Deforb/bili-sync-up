@@ -25,6 +25,7 @@ import type {
 	QueueStatusResponse,
 	CancelQueueTaskResponse,
 	UpdateVideoSourceEnabledResponse,
+	UpdateVideoSourceScanDeletedResponse,
 	ResetVideoSourcePathRequest,
 	ResetVideoSourcePathResponse,
 	UpdateSubmissionSelectedVideosResponse,
@@ -344,8 +345,8 @@ class ApiClient {
 		sourceType: string,
 		id: number,
 		scanDeleted: boolean
-	): Promise<ApiResponse<UpdateVideoSourceEnabledResponse>> {
-		return this.put<UpdateVideoSourceEnabledResponse>(
+	): Promise<ApiResponse<UpdateVideoSourceScanDeletedResponse>> {
+		return this.put<UpdateVideoSourceScanDeletedResponse>(
 			`/video-sources/${sourceType}/${id}/scan-deleted`,
 			{ scan_deleted_videos: scanDeleted }
 		);
@@ -363,6 +364,7 @@ class ApiClient {
 		options: {
 			audio_only?: boolean;
 			audio_only_m4a_only?: boolean;
+			folder_mode?: 'normal' | 'flat' | 'weak_flat';
 			flat_folder?: boolean;
 			download_danmaku?: boolean;
 			download_subtitle?: boolean;
@@ -383,6 +385,7 @@ class ApiClient {
 			source_type: string;
 			audio_only: boolean;
 			audio_only_m4a_only: boolean;
+			folder_mode: 'normal' | 'flat' | 'weak_flat';
 			flat_folder: boolean;
 			download_danmaku: boolean;
 			download_subtitle: boolean;
@@ -405,6 +408,7 @@ class ApiClient {
 			source_type: string;
 			audio_only: boolean;
 			audio_only_m4a_only: boolean;
+			folder_mode: 'normal' | 'flat' | 'weak_flat';
 			flat_folder: boolean;
 			download_danmaku: boolean;
 			download_subtitle: boolean;
@@ -1112,6 +1116,7 @@ export const api = {
 		options: {
 			audio_only?: boolean;
 			audio_only_m4a_only?: boolean;
+			folder_mode?: 'normal' | 'flat' | 'weak_flat';
 			flat_folder?: boolean;
 			download_danmaku?: boolean;
 			download_subtitle?: boolean;

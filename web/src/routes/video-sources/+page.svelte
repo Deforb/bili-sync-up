@@ -40,6 +40,7 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
+	import type { VideoSource } from '$lib/types';
 
 	let loading = false;
 	let bulkUpdating = false;
@@ -508,25 +509,49 @@
 	}
 
 	// 切换平铺目录设置
-	async function handleToggleFlatFolder(
+	function getFolderMode(source: { folder_mode?: string; flat_folder?: boolean }):
+		| 'normal'
+		| 'flat'
+		| 'weak_flat' {
+		if (source.folder_mode === 'flat' || source.folder_mode === 'weak_flat' || source.folder_mode === 'normal') {
+			return source.folder_mode;
+		}
+		return source.flat_folder ? 'flat' : 'normal';
+	}
+
+	function nextFolderMode(mode: 'normal' | 'flat' | 'weak_flat'): 'normal' | 'flat' | 'weak_flat' {
+		if (mode === 'normal') return 'flat';
+		if (mode === 'flat') return 'weak_flat';
+		return 'normal';
+	}
+
+	function folderModeText(mode: 'normal' | 'flat' | 'weak_flat'): string {
+		if (mode === 'flat') return '平铺目录';
+		if (mode === 'weak_flat') return '弱平铺';
+		return '标准目录';
+	}
+
+	async function handleCycleFolderMode(
 		sourceType: string,
 		sourceId: number,
-		currentFlatFolder: boolean
+		currentMode: 'normal' | 'flat' | 'weak_flat'
 	) {
-		const newFlatFolder = !currentFlatFolder;
+		const newMode = nextFolderMode(currentMode);
 		await updateAndApply(
 			() =>
 				api.updateVideoSourceDownloadOptions(sourceType, sourceId, {
-					flat_folder: newFlatFolder
+					folder_mode: newMode,
+					flat_folder: newMode === 'flat'
 				}),
 			{
 				successToast: () => ({
 					title: '设置更新成功',
-					description: newFlatFolder ? '已启用平铺目录模式' : '已禁用平铺目录模式'
+					description: `目录模式已切换为 ${folderModeText(newMode)}`
 				}),
 				applyLocalUpdate: (data) => {
 					updateSourceInStore(sourceType, sourceId, (source) => ({
 						...source,
+						folder_mode: data.folder_mode,
 						flat_folder: data.flat_folder
 					}));
 				}
@@ -1148,8 +1173,10 @@
 															<span class="text-amber-500">仅M4A</span>
 														{/if}
 													{/if}
-													{#if source.flat_folder}
+													{#if getFolderMode(source) === 'flat'}
 														<span class="text-purple-600">平铺目录</span>
+													{:else if getFolderMode(source) === 'weak_flat'}
+														<span class="text-violet-600">弱平铺</span>
 													{/if}
 													{#if source.use_dynamic_api}
 														<span class="text-blue-600">动态API已启用</span>
@@ -1308,23 +1335,25 @@
 													</Button>
 												{/if}
 
-												<!-- 平铺目录 -->
+												<!-- 目录模式（标准/平铺/弱平铺） -->
 												<Button
 													size="sm"
 													variant="ghost"
 													onclick={() =>
-														handleToggleFlatFolder(
+														handleCycleFolderMode(
 															sourceConfig.type,
 															source.id,
-															source.flat_folder ?? false
+															getFolderMode(source)
 														)}
-													title={source.flat_folder ? '禁用平铺目录' : '启用平铺目录'}
+													title={`切换目录模式（当前: ${folderModeText(getFolderMode(source))}）`}
 													class="h-8 w-8 p-0"
 												>
 													<FolderSyncIcon
-														class="h-4 w-4 {source.flat_folder
+														class="h-4 w-4 {getFolderMode(source) === 'flat'
 															? 'text-purple-600'
-															: 'text-gray-400'}"
+															: getFolderMode(source) === 'weak_flat'
+																? 'text-violet-500'
+																: 'text-gray-400'}"
 													/>
 												</Button>
 

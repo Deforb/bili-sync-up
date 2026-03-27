@@ -11,6 +11,9 @@ use chrono::{DateTime, Datelike, Utc};
 use html_escape::decode_html_entities;
 
 use crate::http::headers::{create_api_headers, create_image_headers};
+use crate::utils::folder_mode::{
+    folder_mode_from_api, folder_mode_to_api, is_flat_mode, normalize_folder_mode, FOLDER_MODE_NORMAL,
+};
 use crate::utils::time_format::{now_standard_string, to_standard_string};
 use bili_sync_entity::{collection, favorite, page, submission, video, video_source, watch_later};
 use bili_sync_migration::Expr;
@@ -927,7 +930,8 @@ pub async fn get_video_sources(
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
-                flat_folder: model.flat_folder,
+                folder_mode: folder_mode_to_api(model.folder_mode).to_string(),
+                flat_folder: is_flat_mode(model.folder_mode),
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -986,7 +990,8 @@ pub async fn get_video_sources(
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
-                flat_folder: model.flat_folder,
+                folder_mode: folder_mode_to_api(model.folder_mode).to_string(),
+                flat_folder: is_flat_mode(model.folder_mode),
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -1045,7 +1050,8 @@ pub async fn get_video_sources(
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
-                flat_folder: model.flat_folder,
+                folder_mode: folder_mode_to_api(model.folder_mode).to_string(),
+                flat_folder: is_flat_mode(model.folder_mode),
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -1104,7 +1110,8 @@ pub async fn get_video_sources(
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
-                flat_folder: model.flat_folder,
+                folder_mode: folder_mode_to_api(model.folder_mode).to_string(),
+                flat_folder: is_flat_mode(model.folder_mode),
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -1182,7 +1189,8 @@ pub async fn get_video_sources(
                 keyword_filter_mode: model.keyword_filter_mode,
                 audio_only: model.audio_only,
                 audio_only_m4a_only: model.audio_only_m4a_only,
-                flat_folder: model.flat_folder,
+                folder_mode: folder_mode_to_api(model.folder_mode).to_string(),
+                flat_folder: is_flat_mode(model.folder_mode),
                 download_danmaku: model.download_danmaku,
                 download_subtitle: model.download_subtitle,
                 ai_rename: model.ai_rename,
@@ -2926,6 +2934,11 @@ pub async fn add_video_source_internal(
             } else {
                 None
             };
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                FOLDER_MODE_NORMAL,
+            );
 
             let collection = collection::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
@@ -2955,7 +2968,8 @@ pub async fn add_video_source_internal(
                 aggregate_season_number: sea_orm::Set(aggregate_season_number),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
-                flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                flat_folder: sea_orm::Set(is_flat_mode(folder_mode)),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
@@ -3036,6 +3050,11 @@ pub async fn add_video_source_internal(
 
             // 处理关键词过滤模式
             let keyword_filter_mode = params.keyword_filter_mode.clone();
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                FOLDER_MODE_NORMAL,
+            );
 
             let favorite = favorite::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
@@ -3057,7 +3076,8 @@ pub async fn add_video_source_internal(
                 published_before: sea_orm::Set(None),
                 audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
-                flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                flat_folder: sea_orm::Set(is_flat_mode(folder_mode)),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                 download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
                 ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
@@ -3110,6 +3130,11 @@ pub async fn add_video_source_internal(
 
             // 处理关键词过滤模式
             let keyword_filter_mode = params.keyword_filter_mode.clone();
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                FOLDER_MODE_NORMAL,
+            );
 
             let submission = submission::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
@@ -3148,7 +3173,8 @@ pub async fn add_video_source_internal(
                 ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
                 ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
-                flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                flat_folder: sea_orm::Set(is_flat_mode(folder_mode)),
+                folder_mode: sea_orm::Set(folder_mode),
                 use_dynamic_api: sea_orm::Set(params.use_dynamic_api.unwrap_or(false)),
                 dynamic_api_full_synced: sea_orm::Set(params.use_dynamic_api.unwrap_or(false)),
             };
@@ -3434,6 +3460,11 @@ pub async fn add_video_source_internal(
 
                 // 处理关键词过滤模式
                 let keyword_filter_mode = params.keyword_filter_mode.clone();
+                let folder_mode = folder_mode_from_api(
+                    params.folder_mode.as_deref(),
+                    params.flat_folder,
+                    FOLDER_MODE_NORMAL,
+                );
 
                 let bangumi = video_source::ActiveModel {
                     id: sea_orm::ActiveValue::NotSet,
@@ -3450,6 +3481,9 @@ pub async fn add_video_source_internal(
                     keyword_filters: sea_orm::Set(keyword_filters_json),
                     keyword_filter_mode: sea_orm::Set(keyword_filter_mode),
                     audio_only: sea_orm::Set(params.audio_only.unwrap_or(false)),
+                    audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
+                    flat_folder: sea_orm::Set(is_flat_mode(folder_mode)),
+                    folder_mode: sea_orm::Set(folder_mode),
                     download_danmaku: sea_orm::Set(params.download_danmaku.unwrap_or(true)),
                     download_subtitle: sea_orm::Set(params.download_subtitle.unwrap_or(true)),
                     ai_rename: sea_orm::Set(params.ai_rename.unwrap_or(false)),
@@ -3513,6 +3547,11 @@ pub async fn add_video_source_internal(
 
             // 处理关键词过滤模式
             let keyword_filter_mode = params.keyword_filter_mode.clone();
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                FOLDER_MODE_NORMAL,
+            );
 
             let watch_later = watch_later::ActiveModel {
                 id: sea_orm::ActiveValue::NotSet,
@@ -3541,7 +3580,8 @@ pub async fn add_video_source_internal(
                 ai_rename_enable_bangumi: sea_orm::Set(params.ai_rename_enable_bangumi.unwrap_or(false)),
                 ai_rename_rename_parent_dir: sea_orm::Set(params.ai_rename_rename_parent_dir.unwrap_or(false)),
                 audio_only_m4a_only: sea_orm::Set(params.audio_only_m4a_only.unwrap_or(false)),
-                flat_folder: sea_orm::Set(params.flat_folder.unwrap_or(false)),
+                flat_folder: sea_orm::Set(is_flat_mode(folder_mode)),
+                folder_mode: sea_orm::Set(folder_mode),
             };
 
             let insert_result = watch_later::Entity::insert(watch_later).exec(&txn).await?;
@@ -4572,7 +4612,7 @@ pub async fn delete_video_source_internal(
                     warn!("检测到危险路径，跳过删除: {}", base_path);
                 } else if orphaned_videos.is_empty() {
                     info!("合集 {} 没有找到需要删除的本地文件", collection.name);
-                } else if collection.flat_folder {
+                } else if is_flat_mode(collection.folder_mode) {
                     info!("开始删除合集 {} 的本地文件（平铺目录）", collection.name);
 
                     let mut deleted_files = 0usize;
@@ -4727,7 +4767,7 @@ pub async fn delete_video_source_internal(
                     warn!("检测到危险路径，跳过删除: {}", base_path);
                 } else if orphaned_videos.is_empty() {
                     info!("收藏夹 {} 没有找到需要删除的本地文件", favorite.name);
-                } else if favorite.flat_folder {
+                } else if is_flat_mode(favorite.folder_mode) {
                     info!("开始删除收藏夹 {} 的本地文件（平铺目录）", favorite.name);
 
                     let mut deleted_files = 0usize;
@@ -4885,7 +4925,7 @@ pub async fn delete_video_source_internal(
                     warn!("检测到危险路径，跳过删除: {}", base_path);
                 } else if orphaned_videos.is_empty() {
                     info!("UP主投稿 {} 没有找到需要删除的本地文件", submission.upper_name);
-                } else if submission.flat_folder {
+                } else if is_flat_mode(submission.folder_mode) {
                     info!("开始删除UP主投稿 {} 的本地文件（平铺目录）", submission.upper_name);
 
                     let mut deleted_files = 0usize;
@@ -5043,7 +5083,7 @@ pub async fn delete_video_source_internal(
                     warn!("检测到危险路径，跳过删除: {}", base_path);
                 } else if orphaned_videos.is_empty() {
                     info!("稍后再看没有找到需要删除的本地文件");
-                } else if watch_later.flat_folder {
+                } else if is_flat_mode(watch_later.folder_mode) {
                     info!("开始删除稍后再看的本地文件（平铺目录）");
 
                     let mut deleted_files = 0usize;
@@ -5203,7 +5243,7 @@ pub async fn delete_video_source_internal(
                     warn!("检测到危险路径，跳过删除: {}", base_path);
                 } else if orphaned_videos.is_empty() {
                     info!("番剧 {} 没有找到需要删除的本地文件", bangumi.name);
-                } else if bangumi.flat_folder {
+                } else if is_flat_mode(bangumi.folder_mode) {
                     info!("开始删除番剧 {} 的本地文件（平铺目录）", bangumi.name);
 
                     let mut deleted_files = 0usize;
@@ -5531,6 +5571,7 @@ pub async fn update_video_source_download_options_internal(
     params: crate::api::request::UpdateVideoSourceDownloadOptionsRequest,
 ) -> Result<crate::api::response::UpdateVideoSourceDownloadOptionsResponse, ApiError> {
     let txn = db.begin().await?;
+    let mut mode_change_migration: Option<(String, i32, String)> = None;
 
     let result = match source_type.as_str() {
         "collection" => {
@@ -5541,7 +5582,13 @@ pub async fn update_video_source_download_options_internal(
 
             let audio_only = params.audio_only.unwrap_or(collection.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(collection.audio_only_m4a_only);
-            let flat_folder = params.flat_folder.unwrap_or(collection.flat_folder);
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                normalize_folder_mode(collection.folder_mode),
+            );
+            let mode_changed = folder_mode != normalize_folder_mode(collection.folder_mode);
+            let flat_folder = is_flat_mode(folder_mode);
             let download_danmaku = params.download_danmaku.unwrap_or(collection.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(collection.download_subtitle);
             let collection_aggregate_enabled = params
@@ -5593,6 +5640,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -5607,6 +5655,10 @@ pub async fn update_video_source_download_options_internal(
             .exec(&txn)
             .await?;
 
+            if mode_changed {
+                mode_change_migration = Some(("collection".to_string(), id, collection.path.clone()));
+            }
+
             crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
                 success: true,
                 source_id: id,
@@ -5615,6 +5667,7 @@ pub async fn update_video_source_download_options_internal(
                 collection_aggregate_season_number,
                 audio_only,
                 audio_only_m4a_only,
+                folder_mode: folder_mode_to_api(folder_mode).to_string(),
                 flat_folder,
                 download_danmaku,
                 download_subtitle,
@@ -5637,7 +5690,13 @@ pub async fn update_video_source_download_options_internal(
 
             let audio_only = params.audio_only.unwrap_or(favorite.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(favorite.audio_only_m4a_only);
-            let flat_folder = params.flat_folder.unwrap_or(favorite.flat_folder);
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                normalize_folder_mode(favorite.folder_mode),
+            );
+            let mode_changed = folder_mode != normalize_folder_mode(favorite.folder_mode);
+            let flat_folder = is_flat_mode(folder_mode);
             let download_danmaku = params.download_danmaku.unwrap_or(favorite.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(favorite.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(favorite.ai_rename);
@@ -5667,6 +5726,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -5681,6 +5741,10 @@ pub async fn update_video_source_download_options_internal(
             .exec(&txn)
             .await?;
 
+            if mode_changed {
+                mode_change_migration = Some(("favorite".to_string(), id, favorite.path.clone()));
+            }
+
             crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
                 success: true,
                 source_id: id,
@@ -5689,6 +5753,7 @@ pub async fn update_video_source_download_options_internal(
                 collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
+                folder_mode: folder_mode_to_api(folder_mode).to_string(),
                 flat_folder,
                 download_danmaku,
                 download_subtitle,
@@ -5711,7 +5776,13 @@ pub async fn update_video_source_download_options_internal(
 
             let audio_only = params.audio_only.unwrap_or(submission.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(submission.audio_only_m4a_only);
-            let flat_folder = params.flat_folder.unwrap_or(submission.flat_folder);
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                normalize_folder_mode(submission.folder_mode),
+            );
+            let mode_changed = folder_mode != normalize_folder_mode(submission.folder_mode);
+            let flat_folder = is_flat_mode(folder_mode);
             let download_danmaku = params.download_danmaku.unwrap_or(submission.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(submission.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(submission.ai_rename);
@@ -5753,6 +5824,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -5773,6 +5845,10 @@ pub async fn update_video_source_download_options_internal(
 
             submission::Entity::update(update_model).exec(&txn).await?;
 
+            if mode_changed {
+                mode_change_migration = Some(("submission".to_string(), id, submission.path.clone()));
+            }
+
             crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
                 success: true,
                 source_id: id,
@@ -5781,6 +5857,7 @@ pub async fn update_video_source_download_options_internal(
                 collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
+                folder_mode: folder_mode_to_api(folder_mode).to_string(),
                 flat_folder,
                 download_danmaku,
                 download_subtitle,
@@ -5803,7 +5880,13 @@ pub async fn update_video_source_download_options_internal(
 
             let audio_only = params.audio_only.unwrap_or(watch_later.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(watch_later.audio_only_m4a_only);
-            let flat_folder = params.flat_folder.unwrap_or(watch_later.flat_folder);
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                normalize_folder_mode(watch_later.folder_mode),
+            );
+            let mode_changed = folder_mode != normalize_folder_mode(watch_later.folder_mode);
+            let flat_folder = is_flat_mode(folder_mode);
             let download_danmaku = params.download_danmaku.unwrap_or(watch_later.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(watch_later.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(watch_later.ai_rename);
@@ -5833,6 +5916,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -5847,6 +5931,10 @@ pub async fn update_video_source_download_options_internal(
             .exec(&txn)
             .await?;
 
+            if mode_changed {
+                mode_change_migration = Some(("watch_later".to_string(), id, watch_later.path.clone()));
+            }
+
             crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
                 success: true,
                 source_id: id,
@@ -5855,6 +5943,7 @@ pub async fn update_video_source_download_options_internal(
                 collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
+                folder_mode: folder_mode_to_api(folder_mode).to_string(),
                 flat_folder,
                 download_danmaku,
                 download_subtitle,
@@ -5877,7 +5966,13 @@ pub async fn update_video_source_download_options_internal(
 
             let audio_only = params.audio_only.unwrap_or(video_source.audio_only);
             let audio_only_m4a_only = params.audio_only_m4a_only.unwrap_or(video_source.audio_only_m4a_only);
-            let flat_folder = params.flat_folder.unwrap_or(video_source.flat_folder);
+            let folder_mode = folder_mode_from_api(
+                params.folder_mode.as_deref(),
+                params.flat_folder,
+                normalize_folder_mode(video_source.folder_mode),
+            );
+            let mode_changed = folder_mode != normalize_folder_mode(video_source.folder_mode);
+            let flat_folder = is_flat_mode(folder_mode);
             let download_danmaku = params.download_danmaku.unwrap_or(video_source.download_danmaku);
             let download_subtitle = params.download_subtitle.unwrap_or(video_source.download_subtitle);
             let ai_rename = params.ai_rename.unwrap_or(video_source.ai_rename);
@@ -5907,6 +6002,7 @@ pub async fn update_video_source_download_options_internal(
                 audio_only: sea_orm::Set(audio_only),
                 audio_only_m4a_only: sea_orm::Set(audio_only_m4a_only),
                 flat_folder: sea_orm::Set(flat_folder),
+                folder_mode: sea_orm::Set(folder_mode),
                 download_danmaku: sea_orm::Set(download_danmaku),
                 download_subtitle: sea_orm::Set(download_subtitle),
                 ai_rename: sea_orm::Set(ai_rename),
@@ -5921,6 +6017,10 @@ pub async fn update_video_source_download_options_internal(
             .exec(&txn)
             .await?;
 
+            if mode_changed {
+                mode_change_migration = Some(("bangumi".to_string(), id, video_source.path.clone()));
+            }
+
             crate::api::response::UpdateVideoSourceDownloadOptionsResponse {
                 success: true,
                 source_id: id,
@@ -5929,6 +6029,7 @@ pub async fn update_video_source_download_options_internal(
                 collection_aggregate_season_number: None,
                 audio_only,
                 audio_only_m4a_only,
+                folder_mode: folder_mode_to_api(folder_mode).to_string(),
                 flat_folder,
                 download_danmaku,
                 download_subtitle,
@@ -5947,6 +6048,28 @@ pub async fn update_video_source_download_options_internal(
     };
 
     txn.commit().await?;
+
+    if let Some((migrate_source_type, migrate_id, migrate_path)) = mode_change_migration {
+        info!(
+            "目录模式发生变化，开始迁移历史文件: source_type={}, id={}, base_path={}",
+            migrate_source_type, migrate_id, migrate_path
+        );
+        if let Err(err) = reset_video_source_path_internal(
+            db.clone(),
+            migrate_source_type,
+            migrate_id,
+            crate::api::request::ResetVideoSourcePathRequest {
+                new_path: migrate_path,
+                apply_rename_rules: true,
+                clean_empty_folders: true,
+            },
+        )
+        .await
+        {
+            warn!("目录模式切换后的历史文件迁移失败: {:?}", err);
+        }
+    }
+
     Ok(result)
 }
 
@@ -6590,6 +6713,7 @@ pub async fn reset_video_source_path_internal(
                     .await?;
 
                 for video in &videos {
+                    let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
                     match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
                         .await
@@ -6598,12 +6722,17 @@ pub async fn reset_video_source_path_internal(
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
+                        Err(e) => {
+                            move_succeeded = false;
+                            warn!("移动视频 {} 文件失败，跳过数据库路径更新: {}", video.id, e);
+                        }
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
-                        warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                    if move_succeeded {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                            warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                        }
                     }
                 }
                 updated_videos_count = videos.len();
@@ -6643,6 +6772,7 @@ pub async fn reset_video_source_path_internal(
                     .await?;
 
                 for video in &videos {
+                    let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
                     match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
                         .await
@@ -6651,12 +6781,17 @@ pub async fn reset_video_source_path_internal(
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
+                        Err(e) => {
+                            move_succeeded = false;
+                            warn!("移动视频 {} 文件失败，跳过数据库路径更新: {}", video.id, e);
+                        }
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
-                        warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                    if move_succeeded {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                            warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                        }
                     }
                 }
                 updated_videos_count = videos.len();
@@ -6695,6 +6830,7 @@ pub async fn reset_video_source_path_internal(
                     .await?;
 
                 for video in &videos {
+                    let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
                     match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
                         .await
@@ -6703,12 +6839,17 @@ pub async fn reset_video_source_path_internal(
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
+                        Err(e) => {
+                            move_succeeded = false;
+                            warn!("移动视频 {} 文件失败，跳过数据库路径更新: {}", video.id, e);
+                        }
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
-                        warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                    if move_succeeded {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                            warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                        }
                     }
                 }
                 updated_videos_count = videos.len();
@@ -6747,6 +6888,7 @@ pub async fn reset_video_source_path_internal(
                     .await?;
 
                 for video in &videos {
+                    let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
                     match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
                         .await
@@ -6755,12 +6897,17 @@ pub async fn reset_video_source_path_internal(
                             moved_files_count += moved;
                             cleaned_folders_count += cleaned;
                         }
-                        Err(e) => warn!("移动视频 {} 文件失败: {}", video.id, e),
+                        Err(e) => {
+                            move_succeeded = false;
+                            warn!("移动视频 {} 文件失败，跳过数据库路径更新: {}", video.id, e);
+                        }
                     }
 
                     // 重新生成视频和分页的路径
-                    if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
-                        warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                    if move_succeeded {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                            warn!("更新视频 {} 路径失败: {:?}", video.id, e);
+                        }
                     }
                 }
                 updated_videos_count = videos.len();
@@ -6871,6 +7018,15 @@ async fn move_files_with_four_step_rename(old_path: &str, target_path: &str) -> 
         return Ok(target_path.to_string_lossy().to_string());
     }
 
+    // 禁止把目录整体移动到其子目录，否则步骤1后会导致目标父目录失效。
+    if target_path.starts_with(old_path) {
+        return Err(std::io::Error::other(format!(
+            "非法目录迁移: target 位于 old 内部 old={}, target={}",
+            old_path.display(),
+            target_path.display()
+        )));
+    }
+
     // 确保目标目录的父目录存在
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -6893,8 +7049,11 @@ async fn move_files_with_four_step_rename(old_path: &str, target_path: &str) -> 
     // 步骤1: 重命名到临时名称
     std::fs::rename(old_path, &temp_path)?;
 
-    // 步骤2: 移动到目标目录
-    std::fs::rename(&temp_path, &temp_target_path)?;
+    // 步骤2: 移动到目标目录（失败时回滚）
+    if let Err(err) = std::fs::rename(&temp_path, &temp_target_path) {
+        let _ = std::fs::rename(&temp_path, old_path);
+        return Err(err);
+    }
 
     // 步骤3: 重命名为最终名称
     let final_path = if target_path.exists() {
@@ -6907,13 +7066,19 @@ async fn move_files_with_four_step_rename(old_path: &str, target_path: &str) -> 
             let conflict_name = format!("{}_{}", target_name.to_string_lossy(), counter);
             let conflict_path = target_parent.join(&conflict_name);
             if !conflict_path.exists() {
-                std::fs::rename(&temp_target_path, &conflict_path)?;
+                if let Err(err) = std::fs::rename(&temp_target_path, &conflict_path) {
+                    let _ = std::fs::rename(&temp_target_path, old_path);
+                    return Err(err);
+                }
                 break conflict_path;
             }
             counter += 1;
         }
     } else {
-        std::fs::rename(&temp_target_path, target_path)?;
+        if let Err(err) = std::fs::rename(&temp_target_path, target_path) {
+            let _ = std::fs::rename(&temp_target_path, old_path);
+            return Err(err);
+        }
         target_path.to_path_buf()
     };
 
@@ -6929,7 +7094,6 @@ async fn move_video_files_to_new_path(
 ) -> Result<(usize, usize), std::io::Error> {
     use std::path::Path;
 
-    let mut moved_count = 0;
     let mut cleaned_count = 0;
 
     // 获取当前视频的存储路径
@@ -6956,26 +7120,22 @@ async fn move_video_files_to_new_path(
     }
 
     // 使用四步重命名原则移动整个视频文件夹
-    if (move_files_with_four_step_rename(
+    move_files_with_four_step_rename(
         &current_video_path.to_string_lossy(),
         &target_video_dir.to_string_lossy(),
     )
-    .await)
-        .is_ok()
-    {
-        moved_count = 1;
+    .await?;
 
-        // 移动成功后，检查并清理原来的父目录（如果启用了清理且为空）
-        if clean_empty_folders {
-            if let Some(parent_dir) = current_video_path.parent() {
-                if let Ok(count) = cleanup_empty_directory(parent_dir).await {
-                    cleaned_count = count;
-                }
+    // 移动成功后，检查并清理原来的父目录（如果启用了清理且为空）
+    if clean_empty_folders {
+        if let Some(parent_dir) = current_video_path.parent() {
+            if let Ok(count) = cleanup_empty_directory(parent_dir).await {
+                cleaned_count = count;
             }
         }
     }
 
-    Ok((moved_count, cleaned_count))
+    Ok((1, cleaned_count))
 }
 
 /// 正确重新生成视频和分页路径（基于新的基础路径重新计算完整路径）
@@ -16053,7 +16213,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_video_prompt,
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
-                source.flat_folder,
+                is_flat_mode(source.folder_mode),
                 source.ai_rename_rename_parent_dir,
             )
         }
@@ -16069,7 +16229,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_video_prompt,
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
-                source.flat_folder,
+                is_flat_mode(source.folder_mode),
                 source.ai_rename_rename_parent_dir,
             )
         }
@@ -16085,7 +16245,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_video_prompt,
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
-                source.flat_folder,
+                is_flat_mode(source.folder_mode),
                 source.ai_rename_rename_parent_dir,
             )
         }
@@ -16101,7 +16261,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_video_prompt,
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
-                source.flat_folder,
+                is_flat_mode(source.folder_mode),
                 source.ai_rename_rename_parent_dir,
             )
         }
@@ -16117,7 +16277,7 @@ pub async fn ai_rename_history(
                 source.ai_rename_video_prompt,
                 source.ai_rename_audio_prompt,
                 videos_with_pages,
-                source.flat_folder,
+                is_flat_mode(source.folder_mode),
                 source.ai_rename_rename_parent_dir,
             )
         }

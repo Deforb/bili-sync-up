@@ -2169,7 +2169,11 @@ pub async fn batch_ai_rename_for_source(video_source: &VideoSourceEnum, connecti
                 video_id: video_model.id,
                 bvid: video_model.bvid.clone(),
                 single_page: video_model.single_page.unwrap_or(false),
-                flat_folder: video_source.flat_folder(),
+                flat_folder: video_source.flat_folder()
+                    || (video_source.weak_flat_folder()
+                        && video_model.single_page.unwrap_or(false)
+                        && !matches!(video_source, VideoSourceEnum::Collection(_))
+                        && !matches!(video_source, VideoSourceEnum::BangumiSource(_))),
             };
 
             if is_audio {
@@ -2355,7 +2359,7 @@ async fn apply_ai_rename(
     // 重命名子文件夹（单P视频）
     let should_rename_folder = cfg.ai_rename.rename_parent_dir
         && video_source.ai_rename_rename_parent_dir()
-        && !video_source.flat_folder()
+        && !file.flat_folder
         && file.single_page
         && !matches!(video_source, VideoSourceEnum::Collection(_));
 
@@ -2882,8 +2886,14 @@ pub async fn download_video_pages(
         None
     };
 
-    // 平铺目录模式（不为单个视频/季度创建子文件夹）
-    let flat_folder = video_source.flat_folder();
+    // 目录模式：normal/flat/weak_flat
+    let force_flat_folder = video_source.flat_folder();
+    let weak_flat_folder = video_source.weak_flat_folder();
+    let flat_folder = force_flat_folder
+        || (weak_flat_folder
+            && final_video_model.single_page.unwrap_or(true)
+            && !is_collection
+            && !is_bangumi);
 
     // 获取番剧源和季度信息
     let (base_path, season_folder, bangumi_folder_path) = if is_bangumi {
@@ -2895,8 +2905,8 @@ pub async fn download_video_pages(
         // 为番剧创建独立的文件夹：配置路径 -> 番剧文件夹 -> Season文件夹
         let bangumi_root_path = bangumi_source.path();
 
-        // 平铺目录模式：直接使用视频源根目录，不创建番剧文件夹/Season结构
-        if flat_folder {
+        // 全平铺模式：直接使用视频源根目录，不创建番剧文件夹/Season结构
+        if force_flat_folder {
             debug!("平铺目录模式：番剧所有文件直接放在视频源根目录，跳过Season目录结构");
             (
                 bangumi_root_path.to_path_buf(),
@@ -3034,7 +3044,11 @@ pub async fn download_video_pages(
         }
 
         if flat_folder {
-            debug!("平铺目录模式：所有文件直接放在视频源根目录");
+            if weak_flat_folder {
+                debug!("弱平铺模式：当前视频满足单P条件，文件直接放在视频源根目录");
+            } else {
+                debug!("平铺目录模式：所有文件直接放在视频源根目录");
+            }
         }
 
         let path = if flat_folder {

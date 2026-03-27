@@ -170,10 +170,23 @@ pub trait VideoSource {
         false
     }
 
-    /// 是否启用平铺目录模式（不为每个视频创建子文件夹）
-    /// 默认为 false
+    /// 目录模式：0=normal, 1=flat, 2=weak_flat
+    fn folder_mode(&self) -> i32 {
+        if self.flat_folder() {
+            crate::utils::folder_mode::FOLDER_MODE_FLAT
+        } else {
+            crate::utils::folder_mode::FOLDER_MODE_NORMAL
+        }
+    }
+
+    /// 是否启用全平铺目录模式（不为每个视频创建子文件夹）
     fn flat_folder(&self) -> bool {
-        false
+        crate::utils::folder_mode::is_flat_mode(self.folder_mode())
+    }
+
+    /// 是否启用弱平铺目录模式（仅单P视频平铺）
+    fn weak_flat_folder(&self) -> bool {
+        crate::utils::folder_mode::is_weak_flat_mode(self.folder_mode())
     }
 
     /// 获取是否下载弹幕（默认为 true）

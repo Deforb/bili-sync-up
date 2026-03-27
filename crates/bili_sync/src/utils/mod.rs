@@ -7,6 +7,7 @@ pub mod deepseek_pow;
 pub mod deepseek_web;
 pub mod file_logger;
 pub mod filenamify;
+pub mod folder_mode;
 pub mod format_arg;
 pub mod keyword_filter;
 pub mod model;

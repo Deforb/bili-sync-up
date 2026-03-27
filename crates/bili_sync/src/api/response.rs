@@ -129,6 +129,7 @@ pub struct UpdateVideoSourceDownloadOptionsResponse {
     pub collection_aggregate_season_number: Option<i32>,
     pub audio_only: bool,
     pub audio_only_m4a_only: bool,
+    pub folder_mode: String,
     pub flat_folder: bool,
     pub download_danmaku: bool,
     pub download_subtitle: bool,
@@ -227,6 +228,7 @@ pub struct VideoSource {
     // 音频和下载选项
     pub audio_only: bool,                  // 是否仅下载音频（输出m4a）
     pub audio_only_m4a_only: bool,         // 仅音频时只保留m4a（不下载封面/nfo/弹幕/字幕）
+    pub folder_mode: String,               // 目录模式: normal/flat/weak_flat
     pub flat_folder: bool,                 // 是否启用平铺目录模式
     pub download_danmaku: bool,            // 是否下载弹幕文件
     pub download_subtitle: bool,           // 是否下载字幕文件

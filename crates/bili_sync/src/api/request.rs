@@ -84,7 +84,10 @@ pub struct AddVideoSourceRequest {
     pub ai_rename_rename_parent_dir: Option<bool>,
     // 仅音频时是否只保留m4a（不下载封面/nfo/弹幕/字幕）
     pub audio_only_m4a_only: Option<bool>,
+    // 目录模式: "normal" | "flat" | "weak_flat"
+    pub folder_mode: Option<String>,
     // 是否启用平铺目录模式（不为每个视频创建子文件夹）
+    // 兼容旧客户端，优先级低于 folder_mode
     pub flat_folder: Option<bool>,
     // 是否使用动态API获取UP主投稿（仅submission有效）
     pub use_dynamic_api: Option<bool>,
@@ -115,7 +118,10 @@ pub struct UpdateVideoSourceDownloadOptionsRequest {
     pub audio_only: Option<bool>,
     /// 仅音频时是否只保留m4a（不下载封面/nfo/弹幕/字幕）
     pub audio_only_m4a_only: Option<bool>,
+    /// 目录模式: "normal" | "flat" | "weak_flat"
+    pub folder_mode: Option<String>,
     /// 是否启用平铺目录模式（不为每个视频创建子文件夹）
+    /// 兼容旧客户端，优先级低于 folder_mode
     pub flat_folder: Option<bool>,
     /// 是否下载弹幕文件（ASS）
     pub download_danmaku: Option<bool>,

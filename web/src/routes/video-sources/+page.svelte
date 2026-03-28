@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
@@ -20,6 +20,7 @@
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
+	import type { VideoSourcesResponse } from '$lib/types';
 
 	// 图标导入
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -43,6 +44,12 @@
 
 	let loading = false;
 	let bulkUpdating = false;
+	let sourcesEventSource: EventSource | null = null;
+	let currentSourcesStreamUrl: string | null = null;
+	const queuedDeleteNoticeMap = new Map<
+		string,
+		{ sourceType: VideoSourceType; sourceId: number; sourceName: string }
+	>();
 
 	// 响应式相关
 	const isMobileQuery = new IsMobile();
@@ -128,6 +135,90 @@
 		});
 		if (!response) return;
 		setVideoSources(response.data);
+	}
+
+	function buildVideoSourcesStreamUrl(): string | null {
+		if (typeof localStorage === 'undefined') return null;
+		const token = localStorage.getItem('auth_token');
+		if (!token) return null;
+
+		const searchParams = new URLSearchParams();
+		searchParams.append('token', token);
+		return `/api/video-sources/live?${searchParams.toString()}`;
+	}
+
+	function sourceStillExists(
+		sources: VideoSourcesResponse,
+		sourceType: VideoSourceType,
+		sourceId: number
+	): boolean {
+		return sources[sourceType]?.some((source) => source.id === sourceId) ?? false;
+	}
+
+	function markQueuedDeletePending(
+		sourceType: VideoSourceType,
+		sourceId: number,
+		sourceName: string
+	) {
+		queuedDeleteNoticeMap.set(`${sourceType}:${sourceId}`, {
+			sourceType,
+			sourceId,
+			sourceName
+		});
+	}
+
+	function notifyCompletedQueuedDeletions(sources: VideoSourcesResponse) {
+		for (const [key, pendingDelete] of queuedDeleteNoticeMap.entries()) {
+			if (sourceStillExists(sources, pendingDelete.sourceType, pendingDelete.sourceId)) {
+				continue;
+			}
+
+			queuedDeleteNoticeMap.delete(key);
+			toast.success('删除完成', {
+				description: `视频源「${pendingDelete.sourceName}」已从列表移除`
+			});
+		}
+	}
+
+	function stopVideoSourcesStream() {
+		if (sourcesEventSource) {
+			sourcesEventSource.close();
+			sourcesEventSource = null;
+		}
+		currentSourcesStreamUrl = null;
+	}
+
+	function startVideoSourcesStream() {
+		const streamUrl = buildVideoSourcesStreamUrl();
+		if (!streamUrl) {
+			stopVideoSourcesStream();
+			return;
+		}
+
+		if (sourcesEventSource && currentSourcesStreamUrl === streamUrl) {
+			return;
+		}
+
+		stopVideoSourcesStream();
+		currentSourcesStreamUrl = streamUrl;
+
+		const eventSource = new EventSource(streamUrl);
+		sourcesEventSource = eventSource;
+
+		eventSource.addEventListener('sources', (event) => {
+			try {
+				const payload = JSON.parse((event as MessageEvent).data) as VideoSourcesResponse;
+				notifyCompletedQueuedDeletions(payload);
+				setVideoSources(payload);
+			} catch (error) {
+				console.error('解析视频源实时更新失败:', error);
+			}
+		});
+
+		eventSource.onerror = () => {
+			if (sourcesEventSource !== eventSource) return;
+			console.warn('视频源实时更新连接异常，等待浏览器自动重连');
+		};
 	}
 
 	// 投稿源扫描策略配置（分批/自适应）
@@ -730,7 +821,14 @@
 					};
 				},
 				applyLocalUpdate: (data) => {
-					if (isQueuedMessage(data.message)) return;
+					if (isQueuedMessage(data.message)) {
+						markQueuedDeletePending(
+							deleteSourceInfo.type as VideoSourceType,
+							deleteSourceInfo.id,
+							deleteSourceInfo.name
+						);
+						return;
+					}
 					removeSourceFromStore(deleteSourceInfo.type, deleteSourceInfo.id);
 				}
 			}
@@ -914,7 +1012,12 @@
 	onMount(() => {
 		setBreadcrumb([{ label: '视频源管理' }]);
 		loadVideoSources();
+		startVideoSourcesStream();
 		loadSubmissionScanConfig();
+	});
+
+	onDestroy(() => {
+		stopVideoSourcesStream();
 	});
 </script>
 

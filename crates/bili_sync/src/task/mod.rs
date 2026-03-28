@@ -4,6 +4,7 @@ pub mod video_downloader;
 pub use http_server::http_server;
 pub use video_downloader::video_downloader;
 
+use crate::utils::live_updates::{notify_queue_status_changed, notify_videos_changed};
 use crate::utils::time_format::now_standard_string;
 use anyhow::Result;
 use bili_sync_entity::task_queue::{self, Entity as TaskQueueEntity, TaskStatus, TaskType};
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const TASK_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -145,6 +146,8 @@ pub struct ReloadConfigTask {
 pub struct DeleteTaskQueue {
     /// 待处理的删除任务队列（内存缓存）
     queue: Mutex<VecDeque<DeleteVideoSourceTask>>,
+    /// 当前正在处理的删除任务
+    current_task: Mutex<Option<DeleteVideoSourceTask>>,
     /// 是否正在处理删除任务
     is_processing: AtomicBool,
 }
@@ -153,12 +156,72 @@ impl DeleteTaskQueue {
     pub fn new() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
+            current_task: Mutex::new(None),
             is_processing: AtomicBool::new(false),
         }
     }
 
+    /// 检查当前是否已有相同视频源正在删除或等待删除
+    pub async fn has_pending_delete_task(
+        &self,
+        source_type: &str,
+        source_id: i32,
+        connection: &DatabaseConnection,
+    ) -> Result<bool> {
+        {
+            let current_task = self.current_task.lock().await;
+            if let Some(task) = current_task.as_ref() {
+                if task.source_type == source_type && task.source_id == source_id {
+                    return Ok(true);
+                }
+            }
+        }
+
+        let count = TaskQueueEntity::find()
+            .filter(task_queue::Column::TaskType.eq(TaskType::DeleteVideoSource))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .count(connection)
+            .await?;
+
+        if count == 0 {
+            return Ok(false);
+        }
+
+        let pending_tasks = TaskQueueEntity::find()
+            .filter(task_queue::Column::TaskType.eq(TaskType::DeleteVideoSource))
+            .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
+            .all(connection)
+            .await?;
+
+        for task_record in pending_tasks {
+            match serde_json::from_str::<DeleteVideoSourceTask>(&task_record.task_data) {
+                Ok(task_data) => {
+                    if task_data.source_type == source_type && task_data.source_id == source_id {
+                        return Ok(true);
+                    }
+                }
+                Err(err) => {
+                    warn!("解析删除视频源任务失败，跳过重复检查: {}", err);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     /// 添加删除任务到队列（同时保存到数据库）
     pub async fn enqueue_task(&self, task: DeleteVideoSourceTask, connection: &DatabaseConnection) -> Result<()> {
+        if self
+            .has_pending_delete_task(task.source_type.as_str(), task.source_id, connection)
+            .await?
+        {
+            debug!(
+                "视频源 {} ID={} 已有待处理或正在执行的删除任务，跳过重复创建",
+                task.source_type, task.source_id
+            );
+            return Ok(());
+        }
+
         // 保存到数据库
         let task_data = serde_json::to_string(&task)?;
         let active_model = task_queue::ActiveModel {
@@ -183,6 +246,7 @@ impl DeleteTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -190,7 +254,11 @@ impl DeleteTaskQueue {
     /// 从队列中取出下一个任务
     pub async fn dequeue_task(&self) -> Option<DeleteVideoSourceTask> {
         let mut queue = self.queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记任务为已完成（更新数据库状态）
@@ -278,6 +346,7 @@ impl DeleteTaskQueue {
             .exec(connection)
             .await?;
 
+        notify_queue_status_changed();
         Ok(true)
     }
 
@@ -289,6 +358,13 @@ impl DeleteTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
+    }
+
+    /// 设置当前正在执行的删除任务
+    pub async fn set_current_task(&self, task: Option<DeleteVideoSourceTask>) {
+        let mut current_task = self.current_task.lock().await;
+        *current_task = task;
     }
 
     /// 处理队列中的所有删除任务
@@ -315,6 +391,7 @@ impl DeleteTaskQueue {
                 "正在处理删除任务: {} ID={} (是否删除本地文件: {})",
                 task.source_type, task.source_id, task.delete_local_files
             );
+            self.set_current_task(Some(task.clone())).await;
 
             match delete_video_source_internal(
                 db.clone(),
@@ -362,12 +439,14 @@ impl DeleteTaskQueue {
                     }
                 }
             }
+            self.set_current_task(None).await;
 
             // 每个任务之间稍作间隔，避免过于频繁的数据库操作
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
         self.set_processing(false);
+        self.set_current_task(None).await;
 
         info!("删除任务队列处理完成，共处理 {} 个任务", processed_count);
 
@@ -452,6 +531,7 @@ impl VideoDeleteTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -459,7 +539,11 @@ impl VideoDeleteTaskQueue {
     /// 从队列中取出下一个任务
     pub async fn dequeue_task(&self) -> Option<DeleteVideoTask> {
         let mut queue = self.queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记任务为已完成（更新数据库状态）
@@ -541,6 +625,7 @@ impl VideoDeleteTaskQueue {
             .exec(connection)
             .await?;
 
+        notify_queue_status_changed();
         Ok(true)
     }
 
@@ -558,6 +643,7 @@ impl VideoDeleteTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 处理队列中的所有视频删除任务
@@ -720,6 +806,7 @@ async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -> Re
     }
 
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
+    notify_videos_changed();
 
     Ok(())
 }
@@ -1337,6 +1424,7 @@ impl AddTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -1344,7 +1432,11 @@ impl AddTaskQueue {
     /// 从队列中取出下一个任务
     pub async fn dequeue_task(&self) -> Option<AddVideoSourceTask> {
         let mut queue = self.queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记任务为已完成（更新数据库状态）
@@ -1426,6 +1518,7 @@ impl AddTaskQueue {
             .exec(connection)
             .await?;
 
+        notify_queue_status_changed();
         Ok(true)
     }
 
@@ -1437,6 +1530,7 @@ impl AddTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 处理队列中的所有添加任务
@@ -1572,6 +1666,7 @@ impl ConfigTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -1600,6 +1695,7 @@ impl ConfigTaskQueue {
             result.id
         );
         queue.push_back(task);
+        notify_queue_status_changed();
 
         Ok(())
     }
@@ -1607,13 +1703,21 @@ impl ConfigTaskQueue {
     /// 从更新配置队列中取出下一个任务
     pub async fn dequeue_update_task(&self) -> Option<UpdateConfigTask> {
         let mut queue = self.update_queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 从重载配置队列中取出下一个任务
     pub async fn dequeue_reload_task(&self) -> Option<ReloadConfigTask> {
         let mut queue = self.reload_queue.lock().await;
-        queue.pop_front()
+        let task = queue.pop_front();
+        if task.is_some() {
+            notify_queue_status_changed();
+        }
+        task
     }
 
     /// 标记更新配置任务为已完成（更新数据库状态）
@@ -1763,6 +1867,7 @@ impl ConfigTaskQueue {
                 .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
                 .exec(connection)
                 .await?;
+            notify_queue_status_changed();
             return Ok(true);
         }
 
@@ -1783,6 +1888,7 @@ impl ConfigTaskQueue {
                 .filter(task_queue::Column::Status.eq(TaskStatus::Pending))
                 .exec(connection)
                 .await?;
+            notify_queue_status_changed();
             return Ok(true);
         }
 
@@ -1797,6 +1903,7 @@ impl ConfigTaskQueue {
     /// 设置处理状态
     pub fn set_processing(&self, is_processing: bool) {
         self.is_processing.store(is_processing, Ordering::SeqCst);
+        notify_queue_status_changed();
     }
 
     /// 查询数据库中待处理的更新配置任务数量

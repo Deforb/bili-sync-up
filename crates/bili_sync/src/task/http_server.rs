@@ -57,6 +57,8 @@ use crate::api::handler::{
     get_video_source_keyword_filters,
     get_video_sources,
     get_videos,
+    stream_queue_status,
+    stream_video_sources,
     stream_videos,
     migrate_config_schema,
     pause_scanning_endpoint,
@@ -154,6 +156,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
     };
     let app = Router::new()
         .route("/api/video-sources", get(get_video_sources))
+        .route("/api/video-sources/live", get(stream_video_sources))
         .route("/api/video-sources", post(add_video_source))
         .route("/api/video-sources/bangumi/list", get(get_bangumi_sources_for_merge))
         .route(
@@ -194,6 +197,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/videos/reset-all", post(reset_all_videos))
         .route("/api/videos/reset-specific-tasks", post(reset_specific_tasks))
         .route("/api/dashboard", get(get_dashboard_data))
+        .route("/api/queue/live", get(stream_queue_status))
         .route("/api/reload-config", post(reload_config))
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))

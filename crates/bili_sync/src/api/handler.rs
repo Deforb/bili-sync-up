@@ -22,7 +22,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tracing::{debug, error, info, warn};
 use utoipa::OpenApi;
 
@@ -45,6 +45,10 @@ use crate::api::response::{
     VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
+use crate::utils::live_updates::{
+    notify_video_sources_changed, notify_videos_changed, subscribe_queue_status_changed,
+    subscribe_video_sources_changed, subscribe_videos_changed,
+};
 use crate::utils::status::{PageStatus, VideoStatus};
 
 // 全局静态的扫码登录服务实例
@@ -767,6 +771,311 @@ mod cleanup_tests {
     }
 }
 
+#[cfg(test)]
+mod queue_sse_tests {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use serde_json::Value;
+    use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+    use sea_orm::{ActiveModelTrait, Set, SqlxSqliteConnector};
+    use std::fs;
+    use std::path::PathBuf;
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    async fn read_next_sse_block(response: &mut reqwest::Response) -> anyhow::Result<String> {
+        let mut buffer = String::new();
+
+        loop {
+            let chunk = timeout(Duration::from_secs(3), response.chunk())
+                .await
+                .context("等待 SSE 数据超时")??;
+            let Some(chunk) = chunk else {
+                return Err(anyhow::anyhow!("SSE 连接在收到完整事件前已关闭"));
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            if let Some(index) = buffer.find("\r\n\r\n").or_else(|| buffer.find("\n\n")) {
+                return Ok(buffer[..index].replace("\r\n", "\n"));
+            }
+        }
+    }
+
+    fn parse_sse_json(block: &str) -> Value {
+        let data = block
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&data).expect("SSE data 应为合法 JSON")
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-{}-{}", prefix, uuid::Uuid::new_v4()));
+        dir
+    }
+
+    async fn create_test_db(prefix: &str) -> Arc<DatabaseConnection> {
+        let dir = unique_temp_dir(prefix);
+        fs::create_dir_all(&dir).expect("应能创建临时数据库目录");
+        let db_path = dir.join("data.sqlite");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("应能连接测试数据库");
+        let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
+
+        Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        Arc::new(db)
+    }
+
+    async fn insert_test_submission(db: &DatabaseConnection, id: i32, upper_name: &str) {
+        submission::ActiveModel {
+            id: Set(id),
+            upper_id: Set(1000 + i64::from(id)),
+            upper_name: Set(upper_name.to_string()),
+            path: Set(format!("/tmp/submission-{id}")),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            latest_row_at: Set("2026-03-28 00:00:00".to_string()),
+            enabled: Set(true),
+            scan_deleted_videos: Set(false),
+            selected_videos: Set(None),
+            keyword_filters: Set(None),
+            keyword_filter_mode: Set(None),
+            blacklist_keywords: Set(None),
+            whitelist_keywords: Set(None),
+            keyword_case_sensitive: Set(false),
+            min_duration_seconds: Set(None),
+            max_duration_seconds: Set(None),
+            published_after: Set(None),
+            published_before: Set(None),
+            audio_only: Set(false),
+            audio_only_m4a_only: Set(false),
+            flat_folder: Set(false),
+            download_danmaku: Set(true),
+            download_subtitle: Set(true),
+            ai_rename: Set(false),
+            ai_rename_video_prompt: Set(String::new()),
+            ai_rename_audio_prompt: Set(String::new()),
+            ai_rename_enable_multi_page: Set(false),
+            ai_rename_enable_collection: Set(false),
+            ai_rename_enable_bangumi: Set(false),
+            ai_rename_rename_parent_dir: Set(false),
+            use_dynamic_api: Set(false),
+            dynamic_api_full_synced: Set(false),
+            last_scan_at: Set(None),
+            next_scan_at: Set(None),
+            no_update_streak: Set(0),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试投稿源");
+    }
+
+    async fn insert_test_video(db: &DatabaseConnection, id: i32, title: &str) {
+        let test_time = chrono::DateTime::from_timestamp(1_640_995_200, 0)
+            .unwrap()
+            .naive_utc();
+
+        video::ActiveModel {
+            id: Set(id),
+            collection_id: Set(None),
+            favorite_id: Set(None),
+            watch_later_id: Set(None),
+            submission_id: Set(Some(1)),
+            source_id: Set(None),
+            source_type: Set(Some(4)),
+            upper_id: Set(2000 + i64::from(id)),
+            upper_name: Set("测试UP".to_string()),
+            upper_face: Set(String::new()),
+            staff_info: Set(None),
+            source_submission_id: Set(None),
+            name: Set(title.to_string()),
+            path: Set(format!("/tmp/video-{id}")),
+            category: Set(1),
+            bvid: Set(format!("BV{id:010}")),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            ctime: Set(test_time),
+            pubtime: Set(test_time),
+            favtime: Set(test_time),
+            download_status: Set(0),
+            valid: Set(true),
+            tags: Set(None),
+            single_page: Set(Some(true)),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            season_id: Set(None),
+            submission_membership_state: Set(0),
+            submission_membership_checked_at: Set(None),
+            ep_id: Set(None),
+            season_number: Set(None),
+            episode_number: Set(None),
+            deleted: Set(0),
+            share_copy: Set(None),
+            show_season_type: Set(None),
+            actors: Set(None),
+            auto_download: Set(false),
+            cid: Set(None),
+            is_charge_video: Set(false),
+            charge_can_play: Set(false),
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试视频");
+    }
+
+    #[tokio::test]
+    async fn test_queue_sse_pushes_new_snapshot_after_state_change() {
+        crate::task::ADD_TASK_QUEUE.set_processing(false);
+
+        let app = Router::new().route("/queue/live", get(stream_queue_status));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{addr}/queue/live"))
+            .send()
+            .await
+            .expect("应能建立 SSE 连接");
+
+        assert!(response.status().is_success(), "SSE 应返回 200");
+
+        let ready_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            ready_block.contains("event: ready"),
+            "建立连接后的首帧应为 ready 事件，实际内容: {ready_block}"
+        );
+
+        let first_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            first_block.contains("event: queue"),
+            "ready 之后应立即收到 queue 快照，实际内容: {first_block}"
+        );
+        let first_payload = parse_sse_json(&first_block);
+        assert_eq!(first_payload["add_queue"]["is_processing"], false);
+
+        crate::task::ADD_TASK_QUEUE.set_processing(true);
+
+        let second_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            second_block.contains("event: queue"),
+            "状态变化后应继续推送 queue 事件，实际内容: {second_block}"
+        );
+        let second_payload = parse_sse_json(&second_block);
+        assert_eq!(second_payload["add_queue"]["is_processing"], true);
+
+        crate::task::ADD_TASK_QUEUE.set_processing(false);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_video_sources_sse_pushes_new_snapshot_after_insert() {
+        let db = create_test_db("sources-sse").await;
+        let app = Router::new().route("/video-sources/live", get(stream_video_sources)).layer(Extension(db.clone()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{addr}/video-sources/live"))
+            .send()
+            .await
+            .expect("应能建立视频源 SSE 连接");
+
+        let ready_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(ready_block.contains("event: ready"), "视频源 SSE 首帧应为 ready，实际内容: {ready_block}");
+
+        let first_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            first_block.contains("event: sources"),
+            "ready 之后应立即收到 sources 快照，实际内容: {first_block}"
+        );
+        let first_payload = parse_sse_json(&first_block);
+        assert_eq!(
+            first_payload["submission"].as_array().map(|items| items.len()),
+            Some(0),
+            "初始投稿源列表应为空"
+        );
+
+        insert_test_submission(db.as_ref(), 1, "测试投稿源").await;
+        notify_video_sources_changed();
+
+        let second_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            second_block.contains("event: sources"),
+            "插入投稿源后应收到新的 sources 事件，实际内容: {second_block}"
+        );
+        let second_payload = parse_sse_json(&second_block);
+        let submissions = second_payload["submission"].as_array().expect("submission 应为数组");
+        assert_eq!(submissions.len(), 1, "应推送新增后的投稿源列表");
+        assert_eq!(submissions[0]["name"], "测试投稿源");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_videos_sse_pushes_new_snapshot_after_insert() {
+        let db = create_test_db("videos-sse").await;
+        let app = Router::new()
+            .route("/videos/live", get(stream_videos))
+            .layer(Extension(db.clone()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut response = reqwest::Client::new()
+            .get(format!("http://{addr}/videos/live"))
+            .send()
+            .await
+            .expect("应能建立视频 SSE 连接");
+
+        let ready_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(ready_block.contains("event: ready"), "视频 SSE 首帧应为 ready，实际内容: {ready_block}");
+
+        let first_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            first_block.contains("event: videos"),
+            "ready 之后应立即收到 videos 快照，实际内容: {first_block}"
+        );
+        let first_payload = parse_sse_json(&first_block);
+        assert_eq!(first_payload["total_count"], 0, "初始视频总数应为 0");
+
+        insert_test_video(db.as_ref(), 1, "测试视频").await;
+        notify_videos_changed();
+
+        let second_block = read_next_sse_block(&mut response).await.unwrap();
+        assert!(
+            second_block.contains("event: videos"),
+            "插入视频后应收到新的 videos 事件，实际内容: {second_block}"
+        );
+        let second_payload = parse_sse_json(&second_block);
+        assert_eq!(second_payload["total_count"], 1, "应推送新增后的视频总数");
+        let videos = second_payload["videos"].as_array().expect("videos 应为数组");
+        assert_eq!(videos.len(), 1, "应推送新增后的视频列表");
+        assert_eq!(videos[0]["name"], "测试视频");
+
+        server.abort();
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
@@ -1207,17 +1516,9 @@ pub async fn get_video_sources(
     }))
 }
 
-async fn resolve_collection_aggregate_season_number(
-    up_id: i64,
-    s_id: i64,
-    collection_type: i32,
-) -> Option<i32> {
-    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(
-        up_id,
-        s_id,
-        collection_type,
-    )
-    .await
+async fn resolve_collection_aggregate_season_number(up_id: i64, s_id: i64, collection_type: i32) -> Option<i32> {
+    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(up_id, s_id, collection_type)
+        .await
     {
         Ok(Some(season_number)) => Some(season_number.max(1)),
         Ok(None) => {
@@ -1390,7 +1691,7 @@ pub async fn get_videos(
     let (page, page_size) = if let (Some(page), Some(page_size)) = (params.page, params.page_size) {
         (page, page_size)
     } else {
-        (1, 10)
+        (0, 10)
     };
 
     // 处理排序参数
@@ -1582,39 +1883,197 @@ pub async fn stream_videos(
     Extension(db): Extension<Arc<DatabaseConnection>>,
     Query(params): Query<VideosRequest>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    const SSE_EVENT_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+
     let stream = async_stream::stream! {
         yield Ok(Event::default().event("ready").data("connected"));
 
-        let mut interval = tokio::time::interval(StdDuration::from_secs(1));
+        let mut receiver = subscribe_videos_changed();
         let mut last_snapshot = String::new();
 
-        loop {
-            interval.tick().await;
+        if let Some(event) = build_videos_sse_event(db.clone(), params.clone(), &mut last_snapshot).await {
+            yield Ok(event);
+        }
 
-            match get_videos(Extension(db.clone()), Query(params.clone())).await {
-                Ok(response) => {
-                    let payload = response.into_data();
-                    match serde_json::to_string(&payload) {
-                        Ok(snapshot) => {
-                            if snapshot != last_snapshot {
-                                last_snapshot = snapshot;
-                                match Event::default().event("videos").json_data(&payload) {
-                                    Ok(event) => yield Ok(event),
-                                    Err(err) => warn!("构建视频实时推送事件失败: {}", err),
-                                }
-                            }
-                        }
-                        Err(err) => warn!("序列化视频实时推送数据失败: {}", err),
-                    }
-                }
-                Err(err) => {
-                    warn!("视频管理页实时刷新失败: {:?}", err);
-                }
+        loop {
+            if !wait_for_batched_change(&mut receiver, SSE_EVENT_DEBOUNCE).await {
+                break;
+            }
+
+            if let Some(event) = build_videos_sse_event(db.clone(), params.clone(), &mut last_snapshot).await {
+                yield Ok(event);
             }
         }
     };
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
+/// 实时推送视频源列表变更
+pub async fn stream_video_sources(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    const SSE_EVENT_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("ready").data("connected"));
+
+        let mut receiver = subscribe_video_sources_changed();
+        let mut last_snapshot = String::new();
+
+        if let Some(event) = build_video_sources_sse_event(db.clone(), &mut last_snapshot).await {
+            yield Ok(event);
+        }
+
+        loop {
+            if !wait_for_batched_change(&mut receiver, SSE_EVENT_DEBOUNCE).await {
+                break;
+            }
+
+            if let Some(event) = build_video_sources_sse_event(db.clone(), &mut last_snapshot).await {
+                yield Ok(event);
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
+/// 实时推送任务队列状态变更
+pub async fn stream_queue_status() -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    const SSE_EVENT_DEBOUNCE: StdDuration = StdDuration::from_millis(150);
+
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().event("ready").data("connected"));
+
+        let mut receiver = subscribe_queue_status_changed();
+        let mut last_snapshot = String::new();
+
+        if let Some(event) = build_queue_status_sse_event(&mut last_snapshot).await {
+            yield Ok(event);
+        }
+
+        loop {
+            if !wait_for_batched_change(&mut receiver, SSE_EVENT_DEBOUNCE).await {
+                break;
+            }
+
+            if let Some(event) = build_queue_status_sse_event(&mut last_snapshot).await {
+                yield Ok(event);
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keep-alive"))
+}
+
+async fn wait_for_batched_change(receiver: &mut watch::Receiver<u64>, debounce: StdDuration) -> bool {
+    if receiver.changed().await.is_err() {
+        return false;
+    }
+
+    loop {
+        let debounce_sleep = tokio::time::sleep(debounce);
+        tokio::pin!(debounce_sleep);
+
+        tokio::select! {
+            _ = &mut debounce_sleep => return true,
+            changed = receiver.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+async fn build_videos_sse_event(
+    db: Arc<DatabaseConnection>,
+    params: VideosRequest,
+    last_snapshot: &mut String,
+) -> Option<Event> {
+    match get_videos(Extension(db), Query(params)).await {
+        Ok(response) => {
+            let payload = response.into_data();
+            match serde_json::to_string(&payload) {
+                Ok(snapshot) => {
+                    if snapshot == *last_snapshot {
+                        return None;
+                    }
+                    *last_snapshot = snapshot;
+                    match Event::default().event("videos").json_data(&payload) {
+                        Ok(event) => Some(event),
+                        Err(err) => {
+                            warn!("构建视频实时推送事件失败: {}", err);
+                            None
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("序列化视频实时推送数据失败: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            warn!("视频管理页实时刷新失败: {:?}", err);
+            None
+        }
+    }
+}
+
+async fn build_video_sources_sse_event(db: Arc<DatabaseConnection>, last_snapshot: &mut String) -> Option<Event> {
+    match get_video_sources(Extension(db)).await {
+        Ok(response) => {
+            let payload = response.into_data();
+            match serde_json::to_string(&payload) {
+                Ok(snapshot) => {
+                    if snapshot == *last_snapshot {
+                        return None;
+                    }
+                    *last_snapshot = snapshot;
+                    match Event::default().event("sources").json_data(&payload) {
+                        Ok(event) => Some(event),
+                        Err(err) => {
+                            warn!("构建视频源实时推送事件失败: {}", err);
+                            None
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("序列化视频源实时推送数据失败: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            warn!("视频源管理页实时刷新失败: {:?}", err);
+            None
+        }
+    }
+}
+
+async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Event> {
+    let payload = load_queue_status_response().await;
+    match serde_json::to_string(&payload) {
+        Ok(snapshot) => {
+            if snapshot == *last_snapshot {
+                return None;
+            }
+            *last_snapshot = snapshot;
+            match Event::default().event("queue").json_data(&payload) {
+                Ok(event) => Some(event),
+                Err(err) => {
+                    warn!("构建队列状态实时推送事件失败: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            warn!("序列化队列状态实时推送数据失败: {}", err);
+            None
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1661,8 +2120,20 @@ pub async fn get_video(
         .one(db.as_ref())
         .await?;
 
-    let Some((_id, bvid, name, upper_name, path, category, download_status, cover, valid, is_charge_video, season_id, source_type)) =
-        raw_video
+    let Some((
+        _id,
+        bvid,
+        name,
+        upper_name,
+        path,
+        category,
+        download_status,
+        cover,
+        valid,
+        is_charge_video,
+        season_id,
+        source_type,
+    )) = raw_video
     else {
         return Err(InnerApiError::NotFound(id).into());
     };
@@ -1840,6 +2311,7 @@ pub async fn reset_video(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     // 获取所有分页信息（包括未重置的）
@@ -2102,6 +2574,7 @@ pub async fn reset_all_videos(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
 
         // 开启这些视频的自动下载，避免被过滤（与 scan 流程对齐）
         if !resetted_videos_info.is_empty() {
@@ -2430,6 +2903,7 @@ pub async fn reset_specific_tasks(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     // 重置视频封面时，同步删除根目录 poster.jpg / folder.jpg，
@@ -2701,6 +3175,7 @@ pub async fn update_video_status(
         }
 
         txn.commit().await?;
+        notify_videos_changed();
     }
 
     // 触发立即扫描（缩短等待）
@@ -3006,11 +3481,7 @@ pub async fn add_video_source_internal(
                     .map(|cred| {
                         format!(
                             "SESSDATA={};bili_jct={};buvid3={};DedeUserID={};ac_time_value={}",
-                            cred.sessdata,
-                            cred.bili_jct,
-                            cred.buvid3,
-                            cred.dedeuserid,
-                            cred.ac_time_value
+                            cred.sessdata, cred.bili_jct, cred.buvid3, cred.dedeuserid, cred.ac_time_value
                         )
                     })
                     .unwrap_or_default();
@@ -3174,6 +3645,7 @@ pub async fn add_video_source_internal(
             if let Some(merge_target_id) = params.merge_to_source_id {
                 let result = handle_bangumi_merge_to_existing(&txn, params, merge_target_id).await?;
                 txn.commit().await?;
+                notify_video_sources_changed();
                 return Ok(result);
             }
 
@@ -3562,6 +4034,7 @@ pub async fn add_video_source_internal(
     std::fs::create_dir_all(&params.path).map_err(|e| anyhow!("创建目录失败: {}", e))?;
 
     txn.commit().await?;
+    notify_video_sources_changed();
 
     Ok(result)
 }
@@ -3799,6 +4272,7 @@ pub async fn update_video_source_enabled_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
     Ok(result)
 }
 
@@ -3827,6 +4301,18 @@ pub async fn delete_video_source(
 
     // 扫描中、删除处理中，或已有待删任务时：统一入队，避免并发删除触发 database is locked。
     if scanning || delete_queue_busy || has_pending_delete_tasks {
+        if crate::task::DELETE_TASK_QUEUE
+            .has_pending_delete_task(source_type.as_str(), id, &db)
+            .await?
+        {
+            return Ok(ApiResponse::ok(crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type,
+                message: "该视频源删除任务正在处理中，请稍候刷新列表".to_string(),
+            }));
+        }
+
         let task_id = uuid::Uuid::new_v4().to_string();
         let delete_task = crate::task::DeleteVideoSourceTask {
             source_type: source_type.clone(),
@@ -3868,9 +4354,19 @@ pub async fn delete_video_source(
     }
 
     // 没有扫描且没有在执行/排队：直接执行删除，并标记“删除处理中”状态。
+    let direct_delete_task = crate::task::DeleteVideoSourceTask {
+        source_type: source_type.clone(),
+        source_id: id,
+        delete_local_files,
+        task_id: "direct-delete".to_string(),
+    };
     crate::task::DELETE_TASK_QUEUE.set_processing(true);
+    crate::task::DELETE_TASK_QUEUE
+        .set_current_task(Some(direct_delete_task))
+        .await;
     let direct_delete_result =
         delete_video_source_internal(db.clone(), source_type.clone(), id, delete_local_files).await;
+    crate::task::DELETE_TASK_QUEUE.set_current_task(None).await;
     crate::task::DELETE_TASK_QUEUE.set_processing(false);
 
     // 直删期间若有新请求入队，立即后台处理，避免堆积到下一轮扫描。
@@ -3895,6 +4391,18 @@ pub async fn delete_video_source(
                 || err_text.contains("Database is locked")
                 || err_text.contains("(code: 5)");
             if is_db_locked {
+                if crate::task::DELETE_TASK_QUEUE
+                    .has_pending_delete_task(source_type.as_str(), id, &db)
+                    .await?
+                {
+                    return Ok(ApiResponse::ok(crate::api::response::DeleteVideoSourceResponse {
+                        success: true,
+                        source_id: id,
+                        source_type,
+                        message: "该视频源删除任务正在处理中，请稍候刷新列表".to_string(),
+                    }));
+                }
+
                 let task_id = uuid::Uuid::new_v4().to_string();
                 let delete_task = crate::task::DeleteVideoSourceTask {
                     source_type: source_type.clone(),
@@ -3903,10 +4411,7 @@ pub async fn delete_video_source(
                     task_id,
                 };
                 crate::task::enqueue_delete_task(delete_task, &db).await?;
-                info!(
-                    "直删遇到数据库锁，已自动回退为队列处理: {} ID={}",
-                    source_type, id
-                );
+                info!("直删遇到数据库锁，已自动回退为队列处理: {} ID={}", source_type, id);
                 if !crate::task::DELETE_TASK_QUEUE.is_processing() {
                     let db_clone = db.clone();
                     tokio::spawn(async move {
@@ -4119,6 +4624,7 @@ pub async fn delete_video_internal(db: Arc<DatabaseConnection>, video_id: i32) -
     }
 
     info!("视频已成功删除: ID={}, 名称={}", video_id, video.name);
+    notify_videos_changed();
 
     Ok(())
 }
@@ -4219,10 +4725,7 @@ async fn cleanup_empty_season_dirs(
     }
 }
 
-async fn cleanup_root_metadata_if_no_media(
-    root_dir: &std::path::Path,
-    deleted_count: &mut usize,
-) {
+async fn cleanup_root_metadata_if_no_media(root_dir: &std::path::Path, deleted_count: &mut usize) {
     if !root_dir.exists() || dir_has_media_files_recursive(root_dir) {
         return;
     }
@@ -4275,15 +4778,54 @@ async fn cleanup_root_metadata_if_no_media(
     }
 }
 
-/// 根据page表精确删除视频文件
-async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i32) -> Result<usize, ApiError> {
-    use tokio::fs;
+#[derive(Debug, Clone)]
+struct LocalSourceCleanupPlan {
+    log_name: String,
+    base_path: String,
+    base_dir_label: &'static str,
+    flat_folder: bool,
+    orphaned_videos: Vec<video::Model>,
+    pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+}
 
-    // 获取该视频的所有页面（分P）
-    let pages = page::Entity::find()
-        .filter(page::Column::VideoId.eq(video_id))
-        .all(conn)
-        .await?;
+async fn build_local_source_cleanup_plan(
+    conn: &impl ConnectionTrait,
+    log_name: String,
+    base_path: String,
+    base_dir_label: &'static str,
+    flat_folder: bool,
+    orphaned_videos: &[video::Model],
+) -> Result<LocalSourceCleanupPlan, ApiError> {
+    let video_ids: Vec<i32> = orphaned_videos.iter().map(|video| video.id).collect();
+    let mut pages_by_video_id: HashMap<i32, Vec<page::Model>> = HashMap::new();
+
+    if !video_ids.is_empty() {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.is_in(video_ids))
+            .all(conn)
+            .await?;
+
+        for page in pages {
+            pages_by_video_id.entry(page.video_id).or_default().push(page);
+        }
+    }
+
+    Ok(LocalSourceCleanupPlan {
+        log_name,
+        base_path,
+        base_dir_label,
+        flat_folder,
+        orphaned_videos: orphaned_videos.to_vec(),
+        pages_by_video_id,
+    })
+}
+
+async fn delete_video_files_from_video_and_pages(
+    conn: &impl ConnectionTrait,
+    video: &video::Model,
+    pages: &[page::Model],
+) -> Result<usize, ApiError> {
+    use tokio::fs;
 
     let mut deleted_count = 0;
     let mut season_dirs = Vec::new();
@@ -4342,74 +4884,63 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
         }
     }
 
-    // 还要删除视频的NFO文件和其他可能的相关文件
-    let video = video::Entity::find_by_id(video_id).one(conn).await?;
+    for page in pages {
+        if let Some(file_path) = &page.path {
+            let video_file = std::path::Path::new(file_path);
+            if let Some(parent_dir) = video_file.parent() {
+                if let Some(file_stem) = video_file.file_stem() {
+                    let file_stem_str = file_stem.to_string_lossy();
 
-    if let Some(video) = video {
-        // 获取页面信息来删除基于视频文件名的相关文件
-        let pages = page::Entity::find()
-            .filter(page::Column::VideoId.eq(video_id))
-            .all(conn)
-            .await?;
-
-        for page in &pages {
-            if let Some(file_path) = &page.path {
-                let video_file = std::path::Path::new(file_path);
-                if let Some(parent_dir) = video_file.parent() {
-                    if let Some(file_stem) = video_file.file_stem() {
-                        let file_stem_str = file_stem.to_string_lossy();
-
-                        // 删除同名的NFO文件
-                        let nfo_path = parent_dir.join(format!("{}.nfo", file_stem_str));
-                        if nfo_path.exists() {
-                            match fs::remove_file(&nfo_path).await {
-                                Ok(_) => {
-                                    debug!("已删除NFO文件: {:?}", nfo_path);
-                                    deleted_count += 1;
-                                }
-                                Err(e) => {
-                                    warn!("删除NFO文件失败: {:?} - {}", nfo_path, e);
-                                }
+                    // 删除同名的NFO文件
+                    let nfo_path = parent_dir.join(format!("{}.nfo", file_stem_str));
+                    if nfo_path.exists() {
+                        match fs::remove_file(&nfo_path).await {
+                            Ok(_) => {
+                                debug!("已删除NFO文件: {:?}", nfo_path);
+                                deleted_count += 1;
+                            }
+                            Err(e) => {
+                                warn!("删除NFO文件失败: {:?} - {}", nfo_path, e);
                             }
                         }
+                    }
 
-                        // 删除封面文件 (-fanart.jpg, -thumb.jpg等)
-                        for suffix in &["fanart", "thumb", "poster"] {
-                            for ext in &["jpg", "jpeg", "png", "webp"] {
-                                let cover_path = parent_dir.join(format!("{}-{}.{}", file_stem_str, suffix, ext));
-                                if cover_path.exists() {
-                                    match fs::remove_file(&cover_path).await {
-                                        Ok(_) => {
-                                            debug!("已删除封面文件: {:?}", cover_path);
-                                            deleted_count += 1;
-                                        }
-                                        Err(e) => {
-                                            warn!("删除封面文件失败: {:?} - {}", cover_path, e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 删除弹幕文件 (.zh-CN.default.ass等)
-                        let danmaku_patterns = [
-                            format!("{}.zh-CN.default.ass", file_stem_str),
-                            format!("{}.ass", file_stem_str),
-                            format!("{}.srt", file_stem_str),
-                            format!("{}.xml", file_stem_str),
-                        ];
-
-                        for pattern in &danmaku_patterns {
-                            let danmaku_path = parent_dir.join(pattern);
-                            if danmaku_path.exists() {
-                                match fs::remove_file(&danmaku_path).await {
+                    // 删除封面文件 (-fanart.jpg, -thumb.jpg等)
+                    for suffix in &["fanart", "thumb", "poster"] {
+                        for ext in &["jpg", "jpeg", "png", "webp"] {
+                            let cover_path = parent_dir.join(format!("{}-{}.{}", file_stem_str, suffix, ext));
+                            if cover_path.exists() {
+                                match fs::remove_file(&cover_path).await {
                                     Ok(_) => {
-                                        debug!("已删除弹幕文件: {:?}", danmaku_path);
+                                        debug!("已删除封面文件: {:?}", cover_path);
                                         deleted_count += 1;
                                     }
                                     Err(e) => {
-                                        warn!("删除弹幕文件失败: {:?} - {}", danmaku_path, e);
+                                        warn!("删除封面文件失败: {:?} - {}", cover_path, e);
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // 删除弹幕文件 (.zh-CN.default.ass等)
+                    let danmaku_patterns = [
+                        format!("{}.zh-CN.default.ass", file_stem_str),
+                        format!("{}.ass", file_stem_str),
+                        format!("{}.srt", file_stem_str),
+                        format!("{}.xml", file_stem_str),
+                    ];
+
+                    for pattern in &danmaku_patterns {
+                        let danmaku_path = parent_dir.join(pattern);
+                        if danmaku_path.exists() {
+                            match fs::remove_file(&danmaku_path).await {
+                                Ok(_) => {
+                                    debug!("已删除弹幕文件: {:?}", danmaku_path);
+                                    deleted_count += 1;
+                                }
+                                Err(e) => {
+                                    warn!("删除弹幕文件失败: {:?} - {}", danmaku_path, e);
                                 }
                             }
                         }
@@ -4417,85 +4948,85 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
                 }
             }
         }
+    }
 
-        // Season结构检测和聚合元数据文件删除
-        if !pages.is_empty() {
-            // 检测是否使用Season结构：比较video.path和page.path
-            if let Some(first_page) = pages.first() {
-                if let Some(page_path) = &first_page.path {
-                    let video_path = std::path::Path::new(&video.path);
-                    let page_path = std::path::Path::new(page_path);
+    // Season结构检测和聚合元数据文件删除
+    if !pages.is_empty() {
+        // 检测是否使用Season结构：比较video.path和page.path
+        if let Some(first_page) = pages.first() {
+            if let Some(page_path) = &first_page.path {
+                let video_path = std::path::Path::new(&video.path);
+                let page_path = std::path::Path::new(page_path);
 
-                    // 如果page路径包含Season文件夹，说明使用了Season结构
-                    let uses_season_structure = page_path.components().any(|component| {
-                        if let std::path::Component::Normal(name) = component {
-                            name.to_string_lossy().starts_with("Season ")
+                // 如果page路径包含Season文件夹，说明使用了Season结构
+                let uses_season_structure = page_path.components().any(|component| {
+                    if let std::path::Component::Normal(name) = component {
+                        name.to_string_lossy().starts_with("Season ")
+                    } else {
+                        false
+                    }
+                });
+
+                if uses_season_structure {
+                    debug!("检测到Season结构，尝试清理空Season目录和根目录元数据");
+
+                    // 只要实际使用了Season目录结构，就先尝试清理已经空掉的Season目录。
+                    // 这一步不能只限定在“合集/多P”上，因为投稿源聚合后的季目录也会遗留 season.nfo。
+                    cleanup_empty_season_dirs(video_path, &season_dirs, &mut deleted_count).await;
+
+                    // 获取配置以确定video_base_name生成规则
+                    let config = crate::config::reload_config();
+
+                    // 确定是否为合集或多P视频
+                    let is_collection = video.collection_id.is_some();
+                    let is_single_page = video.single_page.unwrap_or(true);
+
+                    // 检查是否需要处理
+                    let should_process = (is_collection && config.collection_use_season_structure)
+                        || (!is_single_page && config.multi_page_use_season_structure);
+
+                    if should_process {
+                        let video_base_name = if is_collection && config.collection_use_season_structure {
+                            // 合集：使用合集名称
+                            match collection::Entity::find_by_id(video.collection_id.unwrap_or(0))
+                                .one(conn)
+                                .await
+                            {
+                                Ok(Some(coll)) => coll.name,
+                                _ => "collection".to_string(),
+                            }
                         } else {
-                            false
-                        }
-                    });
+                            // 多P视频：使用视频名称模板
+                            use crate::utils::format_arg::video_format_args;
+                            match crate::config::with_config(|bundle| {
+                                bundle.render_video_template(&video_format_args(video))
+                            }) {
+                                Ok(name) => name,
+                                Err(_) => video.name.clone(),
+                            }
+                        };
 
-                    if uses_season_structure {
-                        debug!("检测到Season结构，尝试清理空Season目录和根目录元数据");
+                        // 只有整个聚合根目录下没有媒体文件时，才删除共享元数据
+                        if !dir_has_media_files_recursive(video_path) {
+                            let metadata_files = [
+                                "tvshow.nfo".to_string(),
+                                "folder.jpg".to_string(),
+                                "poster.jpg".to_string(),
+                                format!("{}-thumb.jpg", video_base_name),
+                                format!("{}-fanart.jpg", video_base_name),
+                                format!("{}-poster.jpg", video_base_name),
+                            ];
 
-                        // 只要实际使用了Season目录结构，就先尝试清理已经空掉的Season目录。
-                        // 这一步不能只限定在“合集/多P”上，因为投稿源聚合后的季目录也会遗留 season.nfo。
-                        cleanup_empty_season_dirs(video_path, &season_dirs, &mut deleted_count).await;
-
-                        // 获取配置以确定video_base_name生成规则
-                        let config = crate::config::reload_config();
-
-                        // 确定是否为合集或多P视频
-                        let is_collection = video.collection_id.is_some();
-                        let is_single_page = video.single_page.unwrap_or(true);
-
-                        // 检查是否需要处理
-                        let should_process = (is_collection && config.collection_use_season_structure)
-                            || (!is_single_page && config.multi_page_use_season_structure);
-
-                        if should_process {
-                            let video_base_name = if is_collection && config.collection_use_season_structure {
-                                // 合集：使用合集名称
-                                match collection::Entity::find_by_id(video.collection_id.unwrap_or(0))
-                                    .one(conn)
-                                    .await
-                                {
-                                    Ok(Some(coll)) => coll.name,
-                                    _ => "collection".to_string(),
-                                }
-                            } else {
-                                // 多P视频：使用视频名称模板
-                                use crate::utils::format_arg::video_format_args;
-                                match crate::config::with_config(|bundle| {
-                                    bundle.render_video_template(&video_format_args(&video))
-                                }) {
-                                    Ok(name) => name,
-                                    Err(_) => video.name.clone(),
-                                }
-                            };
-
-                            // 只有整个聚合根目录下没有媒体文件时，才删除共享元数据
-                            if !dir_has_media_files_recursive(video_path) {
-                                let metadata_files = [
-                                    "tvshow.nfo".to_string(),
-                                    "folder.jpg".to_string(),
-                                    "poster.jpg".to_string(),
-                                    format!("{}-thumb.jpg", video_base_name),
-                                    format!("{}-fanart.jpg", video_base_name),
-                                    format!("{}-poster.jpg", video_base_name),
-                                ];
-
-                                for metadata_file in &metadata_files {
-                                    let metadata_path = video_path.join(metadata_file);
-                                    if metadata_path.exists() {
-                                        match fs::remove_file(&metadata_path).await {
-                                            Ok(_) => {
-                                                info!("已删除Season结构根目录元数据文件: {:?}", metadata_path);
-                                                deleted_count += 1;
-                                            }
-                                            Err(e) => {
-                                                warn!("删除Season结构根目录元数据文件失败: {:?} - {}", metadata_path, e);
-                                            }
+                            for metadata_file in &metadata_files {
+                                let metadata_path = video_path.join(metadata_file);
+                                if metadata_path.exists() {
+                                    match fs::remove_file(&metadata_path).await {
+                                        Ok(_) => {
+                                            info!("已删除Season结构根目录元数据文件: {:?}", metadata_path);
+                                            deleted_count += 1;
+                                        }
+                                        Err(e) => {
+                                            warn!("删除Season结构根目录元数据文件失败: {:?} - {}", metadata_path, e);
                                         }
                                     }
                                 }
@@ -4505,11 +5036,144 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
                 }
             }
         }
-
-        cleanup_root_metadata_if_no_media(std::path::Path::new(&video.path), &mut deleted_count).await;
     }
 
+    cleanup_root_metadata_if_no_media(std::path::Path::new(&video.path), &mut deleted_count).await;
+
     Ok(deleted_count)
+}
+
+/// 根据page表精确删除视频文件
+async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i32) -> Result<usize, ApiError> {
+    let Some(video) = video::Entity::find_by_id(video_id).one(conn).await? else {
+        return Ok(0);
+    };
+
+    let pages = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_id))
+        .all(conn)
+        .await?;
+
+    delete_video_files_from_video_and_pages(conn, &video, &pages).await
+}
+
+async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: LocalSourceCleanupPlan) {
+    let LocalSourceCleanupPlan {
+        log_name,
+        base_path,
+        base_dir_label,
+        flat_folder,
+        orphaned_videos,
+        pages_by_video_id,
+    } = plan;
+
+    if is_dangerous_path_for_deletion(&base_path) {
+        warn!("检测到危险路径，跳过删除: {}", base_path);
+        return;
+    }
+
+    if orphaned_videos.is_empty() {
+        info!("{} 没有找到需要删除的本地文件", log_name);
+    } else if flat_folder {
+        info!("开始删除{}的本地文件（平铺目录）", log_name);
+
+        let mut deleted_files = 0usize;
+        for video in &orphaned_videos {
+            let pages = pages_by_video_id.get(&video.id).map(Vec::as_slice).unwrap_or(&[]);
+
+            match delete_video_files_from_video_and_pages(conn, video, pages).await {
+                Ok(count) => deleted_files += count,
+                Err(e) => warn!("删除源视频文件失败: video_id={} - {:?}", video.id, e),
+            }
+        }
+
+        info!("{} 删除完成，共删除 {} 个文件", log_name, deleted_files);
+    } else {
+        info!("开始删除{}的相关文件夹", log_name);
+
+        let mut deleted_folders = std::collections::HashSet::new();
+        let mut total_deleted_size = 0u64;
+        let normalized_base_path = normalize_file_path(&base_path).trim_end_matches('/').to_string();
+
+        for video in &orphaned_videos {
+            let normalized_video_path = normalize_file_path(&video.path).trim_end_matches('/').to_string();
+            if normalized_video_path == normalized_base_path {
+                warn!("检测到视频路径等于基础目录，按文件方式删除避免误删: {}", video.path);
+                let pages = pages_by_video_id.get(&video.id).map(Vec::as_slice).unwrap_or(&[]);
+
+                if let Err(e) = delete_video_files_from_video_and_pages(conn, video, pages).await {
+                    warn!("删除源视频文件失败: video_id={} - {:?}", video.id, e);
+                }
+                continue;
+            }
+
+            let video_path = std::path::Path::new(&video.path);
+
+            if video_path.exists() && !deleted_folders.contains(&video.path) {
+                match get_directory_size(&video.path) {
+                    Ok(size) => {
+                        let size_mb = size as f64 / 1024.0 / 1024.0;
+                        info!("删除源视频文件夹: {} (大小: {:.2} MB)", video.path, size_mb);
+
+                        if let Err(e) = std::fs::remove_dir_all(&video.path) {
+                            error!("删除源视频文件夹失败: {} - {}", video.path, e);
+                        } else {
+                            info!("成功删除源视频文件夹: {} ({:.2} MB)", video.path, size_mb);
+                            deleted_folders.insert(video.path.clone());
+                            total_deleted_size += size;
+                            cleanup_empty_parent_dirs(&video.path, &base_path);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("无法计算文件夹大小: {} - {}", video.path, e);
+                        if let Err(e) = std::fs::remove_dir_all(&video.path) {
+                            error!("删除源视频文件夹失败: {} - {}", video.path, e);
+                        } else {
+                            info!("成功删除源视频文件夹: {}", video.path);
+                            deleted_folders.insert(video.path.clone());
+                            cleanup_empty_parent_dirs(&video.path, &base_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !deleted_folders.is_empty() {
+            let total_size_mb = total_deleted_size as f64 / 1024.0 / 1024.0;
+            info!(
+                "{} 删除完成，共删除 {} 个文件夹，总大小: {:.2} MB",
+                log_name,
+                deleted_folders.len(),
+                total_size_mb
+            );
+        } else {
+            info!("{} 没有找到需要删除的本地文件夹", log_name);
+        }
+    }
+
+    cleanup_empty_subdirs_under(&base_path);
+    cleanup_empty_dir_if_empty(&base_path, base_dir_label);
+}
+
+async fn delete_orphaned_videos_from_db(
+    conn: &impl ConnectionTrait,
+    orphaned_videos: &[video::Model],
+) -> Result<(), ApiError> {
+    for video in orphaned_videos {
+        page::Entity::delete_many()
+            .filter(page::Column::VideoId.eq(video.id))
+            .exec(conn)
+            .await?;
+    }
+
+    if !orphaned_videos.is_empty() {
+        video::Entity::delete_many()
+            .filter(video::Column::Id.is_in(orphaned_videos.iter().map(|video| video.id)))
+            .exec(conn)
+            .await?;
+    }
+
+    Ok(())
 }
 
 /// 内部删除视频源函数（用于队列处理和直接调用）
@@ -4521,6 +5185,7 @@ pub async fn delete_video_source_internal(
 ) -> Result<crate::api::response::DeleteVideoSourceResponse, ApiError> {
     // 用于保存需要清除断点的UP主ID（仅submission类型使用）
     let mut upper_id_to_clear: Option<i64> = None;
+    let mut cleanup_plan: Option<LocalSourceCleanupPlan> = None;
 
     // 使用主数据库连接
     let txn = db.begin().await?;
@@ -4564,114 +5229,21 @@ pub async fn delete_video_source_internal(
                 .all(&txn)
                 .await?;
 
-            // 如果需要删除本地文件
             if delete_local_files {
-                // 添加安全检查
-                let base_path = &collection.path;
-                if is_dangerous_path_for_deletion(base_path) {
-                    warn!("检测到危险路径，跳过删除: {}", base_path);
-                } else if orphaned_videos.is_empty() {
-                    info!("合集 {} 没有找到需要删除的本地文件", collection.name);
-                } else if collection.flat_folder {
-                    info!("开始删除合集 {} 的本地文件（平铺目录）", collection.name);
-
-                    let mut deleted_files = 0usize;
-                    for video in &orphaned_videos {
-                        match delete_video_files_from_pages(&txn, video.id).await {
-                            Ok(count) => deleted_files += count,
-                            Err(e) => warn!("删除合集视频文件失败: video_id={} - {:?}", video.id, e),
-                        }
-                    }
-
-                    info!("合集 {} 删除完成，共删除 {} 个文件", collection.name, deleted_files);
-                } else {
-                    // 删除合集相关的具体视频文件夹，而不是删除整个合集基础目录
-                    info!("开始删除合集 {} 的相关文件夹", collection.name);
-
-                    // 获取所有相关的视频记录来确定需要删除的具体文件夹
-                    let mut deleted_folders = std::collections::HashSet::new();
-                    let mut total_deleted_size = 0u64;
-                    let normalized_base_path = normalize_file_path(base_path).trim_end_matches('/').to_string();
-
-                    for video in &orphaned_videos {
-                        let normalized_video_path = normalize_file_path(&video.path).trim_end_matches('/').to_string();
-                        if normalized_video_path == normalized_base_path {
-                            warn!("检测到视频路径等于基础目录，按文件方式删除避免误删: {}", video.path);
-                            if let Err(e) = delete_video_files_from_pages(&txn, video.id).await {
-                                warn!("删除合集视频文件失败: video_id={} - {:?}", video.id, e);
-                            }
-                            continue;
-                        }
-
-                        // 对于每个视频，删除其对应的文件夹
-                        let video_path = std::path::Path::new(&video.path);
-
-                        if video_path.exists() && !deleted_folders.contains(&video.path) {
-                            match get_directory_size(&video.path) {
-                                Ok(size) => {
-                                    let size_mb = size as f64 / 1024.0 / 1024.0;
-                                    info!("删除合集视频文件夹: {} (大小: {:.2} MB)", video.path, size_mb);
-
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除合集视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除合集视频文件夹: {} ({:.2} MB)", video.path, size_mb);
-                                        deleted_folders.insert(video.path.clone());
-                                        total_deleted_size += size;
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("无法计算文件夹大小: {} - {}", video.path, e);
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除合集视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除合集视频文件夹: {}", video.path);
-                                        deleted_folders.insert(video.path.clone());
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !deleted_folders.is_empty() {
-                        let total_size_mb = total_deleted_size as f64 / 1024.0 / 1024.0;
-                        info!(
-                            "合集 {} 删除完成，共删除 {} 个文件夹，总大小: {:.2} MB",
-                            collection.name,
-                            deleted_folders.len(),
-                            total_size_mb
-                        );
-                    } else {
-                        info!("合集 {} 没有找到需要删除的本地文件夹", collection.name);
-                    }
-                }
-
-                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
-                cleanup_empty_subdirs_under(base_path);
-                cleanup_empty_dir_if_empty(base_path, "合集基础目录");
+                cleanup_plan = Some(
+                    build_local_source_cleanup_plan(
+                        &txn,
+                        format!("合集 {}", collection.name),
+                        collection.path.clone(),
+                        "合集基础目录",
+                        collection.flat_folder,
+                        &orphaned_videos,
+                    )
+                    .await?,
+                );
             }
 
-            // 删除孤立视频的页面数据
-            for video in &orphaned_videos {
-                page::Entity::delete_many()
-                    .filter(page::Column::VideoId.eq(video.id))
-                    .exec(&txn)
-                    .await?;
-            }
-
-            // 删除孤立视频记录
-            if !orphaned_videos.is_empty() {
-                video::Entity::delete_many()
-                    .filter(video::Column::Id.is_in(orphaned_videos.iter().map(|v| v.id)))
-                    .exec(&txn)
-                    .await?;
-            }
+            delete_orphaned_videos_from_db(&txn, &orphaned_videos).await?;
 
             // 删除数据库中的记录
             collection::Entity::delete_by_id(id).exec(&txn).await?;
@@ -4720,113 +5292,21 @@ pub async fn delete_video_source_internal(
                 .all(&txn)
                 .await?;
 
-            // 如果需要删除本地文件
             if delete_local_files {
-                let base_path = &favorite.path;
-                if is_dangerous_path_for_deletion(base_path) {
-                    warn!("检测到危险路径，跳过删除: {}", base_path);
-                } else if orphaned_videos.is_empty() {
-                    info!("收藏夹 {} 没有找到需要删除的本地文件", favorite.name);
-                } else if favorite.flat_folder {
-                    info!("开始删除收藏夹 {} 的本地文件（平铺目录）", favorite.name);
-
-                    let mut deleted_files = 0usize;
-                    for video in &orphaned_videos {
-                        match delete_video_files_from_pages(&txn, video.id).await {
-                            Ok(count) => deleted_files += count,
-                            Err(e) => warn!("删除收藏夹视频文件失败: video_id={} - {:?}", video.id, e),
-                        }
-                    }
-
-                    info!("收藏夹 {} 删除完成，共删除 {} 个文件", favorite.name, deleted_files);
-                } else {
-                    // 删除收藏夹相关的具体视频文件夹，而不是删除整个收藏夹基础目录
-                    info!("开始删除收藏夹 {} 的相关文件夹", favorite.name);
-
-                    // 获取所有相关的视频记录来确定需要删除的具体文件夹
-                    let mut deleted_folders = std::collections::HashSet::new();
-                    let mut total_deleted_size = 0u64;
-                    let normalized_base_path = normalize_file_path(base_path).trim_end_matches('/').to_string();
-
-                    for video in &orphaned_videos {
-                        let normalized_video_path = normalize_file_path(&video.path).trim_end_matches('/').to_string();
-                        if normalized_video_path == normalized_base_path {
-                            warn!("检测到视频路径等于基础目录，按文件方式删除避免误删: {}", video.path);
-                            if let Err(e) = delete_video_files_from_pages(&txn, video.id).await {
-                                warn!("删除收藏夹视频文件失败: video_id={} - {:?}", video.id, e);
-                            }
-                            continue;
-                        }
-
-                        // 对于每个视频，删除其对应的文件夹
-                        let video_path = std::path::Path::new(&video.path);
-
-                        if video_path.exists() && !deleted_folders.contains(&video.path) {
-                            match get_directory_size(&video.path) {
-                                Ok(size) => {
-                                    let size_mb = size as f64 / 1024.0 / 1024.0;
-                                    info!("删除收藏夹视频文件夹: {} (大小: {:.2} MB)", video.path, size_mb);
-
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除收藏夹视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除收藏夹视频文件夹: {} ({:.2} MB)", video.path, size_mb);
-                                        deleted_folders.insert(video.path.clone());
-                                        total_deleted_size += size;
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("无法计算文件夹大小: {} - {}", video.path, e);
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除收藏夹视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除收藏夹视频文件夹: {}", video.path);
-                                        deleted_folders.insert(video.path.clone());
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !deleted_folders.is_empty() {
-                        let total_size_mb = total_deleted_size as f64 / 1024.0 / 1024.0;
-                        info!(
-                            "收藏夹 {} 删除完成，共删除 {} 个文件夹，总大小: {:.2} MB",
-                            favorite.name,
-                            deleted_folders.len(),
-                            total_size_mb
-                        );
-                    } else {
-                        info!("收藏夹 {} 没有找到需要删除的本地文件夹", favorite.name);
-                    }
-                }
-
-                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
-                cleanup_empty_subdirs_under(base_path);
-                cleanup_empty_dir_if_empty(base_path, "收藏夹基础目录");
+                cleanup_plan = Some(
+                    build_local_source_cleanup_plan(
+                        &txn,
+                        format!("收藏夹 {}", favorite.name),
+                        favorite.path.clone(),
+                        "收藏夹基础目录",
+                        favorite.flat_folder,
+                        &orphaned_videos,
+                    )
+                    .await?,
+                );
             }
 
-            // 删除孤立视频的页面数据
-            for video in &orphaned_videos {
-                page::Entity::delete_many()
-                    .filter(page::Column::VideoId.eq(video.id))
-                    .exec(&txn)
-                    .await?;
-            }
-
-            // 删除孤立视频记录
-            if !orphaned_videos.is_empty() {
-                video::Entity::delete_many()
-                    .filter(video::Column::Id.is_in(orphaned_videos.iter().map(|v| v.id)))
-                    .exec(&txn)
-                    .await?;
-            }
+            delete_orphaned_videos_from_db(&txn, &orphaned_videos).await?;
 
             // 删除数据库中的记录
             favorite::Entity::delete_by_id(id).exec(&txn).await?;
@@ -4878,116 +5358,21 @@ pub async fn delete_video_source_internal(
                 .all(&txn)
                 .await?;
 
-            // 如果需要删除本地文件
             if delete_local_files {
-                let base_path = &submission.path;
-                if is_dangerous_path_for_deletion(base_path) {
-                    warn!("检测到危险路径，跳过删除: {}", base_path);
-                } else if orphaned_videos.is_empty() {
-                    info!("UP主投稿 {} 没有找到需要删除的本地文件", submission.upper_name);
-                } else if submission.flat_folder {
-                    info!("开始删除UP主投稿 {} 的本地文件（平铺目录）", submission.upper_name);
-
-                    let mut deleted_files = 0usize;
-                    for video in &orphaned_videos {
-                        match delete_video_files_from_pages(&txn, video.id).await {
-                            Ok(count) => deleted_files += count,
-                            Err(e) => warn!("删除UP主投稿视频文件失败: video_id={} - {:?}", video.id, e),
-                        }
-                    }
-
-                    info!(
-                        "UP主投稿 {} 删除完成，共删除 {} 个文件",
-                        submission.upper_name, deleted_files
-                    );
-                } else {
-                    // 删除UP主投稿相关的具体视频文件夹，而不是删除整个UP主投稿基础目录
-                    info!("开始删除UP主投稿 {} 的相关文件夹", submission.upper_name);
-
-                    // 获取所有相关的视频记录来确定需要删除的具体文件夹
-                    let mut deleted_folders = std::collections::HashSet::new();
-                    let mut total_deleted_size = 0u64;
-                    let normalized_base_path = normalize_file_path(base_path).trim_end_matches('/').to_string();
-
-                    for video in &orphaned_videos {
-                        let normalized_video_path = normalize_file_path(&video.path).trim_end_matches('/').to_string();
-                        if normalized_video_path == normalized_base_path {
-                            warn!("检测到视频路径等于基础目录，按文件方式删除避免误删: {}", video.path);
-                            if let Err(e) = delete_video_files_from_pages(&txn, video.id).await {
-                                warn!("删除UP主投稿视频文件失败: video_id={} - {:?}", video.id, e);
-                            }
-                            continue;
-                        }
-
-                        // 对于每个视频，删除其对应的文件夹
-                        let video_path = std::path::Path::new(&video.path);
-
-                        if video_path.exists() && !deleted_folders.contains(&video.path) {
-                            match get_directory_size(&video.path) {
-                                Ok(size) => {
-                                    let size_mb = size as f64 / 1024.0 / 1024.0;
-                                    info!("删除UP主投稿视频文件夹: {} (大小: {:.2} MB)", video.path, size_mb);
-
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除UP主投稿视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除UP主投稿视频文件夹: {} ({:.2} MB)", video.path, size_mb);
-                                        deleted_folders.insert(video.path.clone());
-                                        total_deleted_size += size;
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("无法计算文件夹大小: {} - {}", video.path, e);
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除UP主投稿视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除UP主投稿视频文件夹: {}", video.path);
-                                        deleted_folders.insert(video.path.clone());
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !deleted_folders.is_empty() {
-                        let total_size_mb = total_deleted_size as f64 / 1024.0 / 1024.0;
-                        info!(
-                            "UP主投稿 {} 删除完成，共删除 {} 个文件夹，总大小: {:.2} MB",
-                            submission.upper_name,
-                            deleted_folders.len(),
-                            total_size_mb
-                        );
-                    } else {
-                        info!("UP主投稿 {} 没有找到需要删除的本地文件夹", submission.upper_name);
-                    }
-                }
-
-                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
-                cleanup_empty_subdirs_under(base_path);
-                cleanup_empty_dir_if_empty(base_path, "UP主投稿基础目录");
+                cleanup_plan = Some(
+                    build_local_source_cleanup_plan(
+                        &txn,
+                        format!("UP主投稿 {}", submission.upper_name),
+                        submission.path.clone(),
+                        "UP主投稿基础目录",
+                        submission.flat_folder,
+                        &orphaned_videos,
+                    )
+                    .await?,
+                );
             }
 
-            // 删除孤立视频的页面数据
-            for video in &orphaned_videos {
-                page::Entity::delete_many()
-                    .filter(page::Column::VideoId.eq(video.id))
-                    .exec(&txn)
-                    .await?;
-            }
-
-            // 删除孤立视频记录
-            if !orphaned_videos.is_empty() {
-                video::Entity::delete_many()
-                    .filter(video::Column::Id.is_in(orphaned_videos.iter().map(|v| v.id)))
-                    .exec(&txn)
-                    .await?;
-            }
+            delete_orphaned_videos_from_db(&txn, &orphaned_videos).await?;
 
             // 删除数据库中的记录
             submission::Entity::delete_by_id(id).exec(&txn).await?;
@@ -5036,112 +5421,21 @@ pub async fn delete_video_source_internal(
                 .all(&txn)
                 .await?;
 
-            // 如果需要删除本地文件
             if delete_local_files {
-                let base_path = &watch_later.path;
-                if is_dangerous_path_for_deletion(base_path) {
-                    warn!("检测到危险路径，跳过删除: {}", base_path);
-                } else if orphaned_videos.is_empty() {
-                    info!("稍后再看没有找到需要删除的本地文件");
-                } else if watch_later.flat_folder {
-                    info!("开始删除稍后再看的本地文件（平铺目录）");
-
-                    let mut deleted_files = 0usize;
-                    for video in &orphaned_videos {
-                        match delete_video_files_from_pages(&txn, video.id).await {
-                            Ok(count) => deleted_files += count,
-                            Err(e) => warn!("删除稍后再看视频文件失败: video_id={} - {:?}", video.id, e),
-                        }
-                    }
-
-                    info!("稍后再看删除完成，共删除 {} 个文件", deleted_files);
-                } else {
-                    // 删除稍后再看相关的具体视频文件夹，而不是删除整个稍后再看基础目录
-                    info!("开始删除稍后再看的相关文件夹");
-
-                    // 获取所有相关的视频记录来确定需要删除的具体文件夹
-                    let mut deleted_folders = std::collections::HashSet::new();
-                    let mut total_deleted_size = 0u64;
-                    let normalized_base_path = normalize_file_path(base_path).trim_end_matches('/').to_string();
-
-                    for video in &orphaned_videos {
-                        let normalized_video_path = normalize_file_path(&video.path).trim_end_matches('/').to_string();
-                        if normalized_video_path == normalized_base_path {
-                            warn!("检测到视频路径等于基础目录，按文件方式删除避免误删: {}", video.path);
-                            if let Err(e) = delete_video_files_from_pages(&txn, video.id).await {
-                                warn!("删除稍后再看视频文件失败: video_id={} - {:?}", video.id, e);
-                            }
-                            continue;
-                        }
-
-                        // 对于每个视频，删除其对应的文件夹
-                        let video_path = std::path::Path::new(&video.path);
-
-                        if video_path.exists() && !deleted_folders.contains(&video.path) {
-                            match get_directory_size(&video.path) {
-                                Ok(size) => {
-                                    let size_mb = size as f64 / 1024.0 / 1024.0;
-                                    info!("删除稍后再看视频文件夹: {} (大小: {:.2} MB)", video.path, size_mb);
-
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除稍后再看视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除稍后再看视频文件夹: {} ({:.2} MB)", video.path, size_mb);
-                                        deleted_folders.insert(video.path.clone());
-                                        total_deleted_size += size;
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("无法计算文件夹大小: {} - {}", video.path, e);
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除稍后再看视频文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除稍后再看视频文件夹: {}", video.path);
-                                        deleted_folders.insert(video.path.clone());
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !deleted_folders.is_empty() {
-                        let total_size_mb = total_deleted_size as f64 / 1024.0 / 1024.0;
-                        info!(
-                            "稍后再看删除完成，共删除 {} 个文件夹，总大小: {:.2} MB",
-                            deleted_folders.len(),
-                            total_size_mb
-                        );
-                    } else {
-                        info!("稍后再看没有找到需要删除的本地文件夹");
-                    }
-                }
-
-                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
-                cleanup_empty_subdirs_under(base_path);
-                cleanup_empty_dir_if_empty(base_path, "稍后再看基础目录");
+                cleanup_plan = Some(
+                    build_local_source_cleanup_plan(
+                        &txn,
+                        "稍后再看".to_string(),
+                        watch_later.path.clone(),
+                        "稍后再看基础目录",
+                        watch_later.flat_folder,
+                        &orphaned_videos,
+                    )
+                    .await?,
+                );
             }
 
-            // 删除孤立视频的页面数据
-            for video in &orphaned_videos {
-                page::Entity::delete_many()
-                    .filter(page::Column::VideoId.eq(video.id))
-                    .exec(&txn)
-                    .await?;
-            }
-
-            // 删除孤立视频记录
-            if !orphaned_videos.is_empty() {
-                video::Entity::delete_many()
-                    .filter(video::Column::Id.is_in(orphaned_videos.iter().map(|v| v.id)))
-                    .exec(&txn)
-                    .await?;
-            }
+            delete_orphaned_videos_from_db(&txn, &orphaned_videos).await?;
 
             // 删除数据库中的记录
             watch_later::Entity::delete_by_id(id).exec(&txn).await?;
@@ -5196,113 +5490,21 @@ pub async fn delete_video_source_internal(
                 .all(&txn)
                 .await?;
 
-            // 如果需要删除本地文件
             if delete_local_files {
-                let base_path = &bangumi.path;
-                if is_dangerous_path_for_deletion(base_path) {
-                    warn!("检测到危险路径，跳过删除: {}", base_path);
-                } else if orphaned_videos.is_empty() {
-                    info!("番剧 {} 没有找到需要删除的本地文件", bangumi.name);
-                } else if bangumi.flat_folder {
-                    info!("开始删除番剧 {} 的本地文件（平铺目录）", bangumi.name);
-
-                    let mut deleted_files = 0usize;
-                    for video in &orphaned_videos {
-                        match delete_video_files_from_pages(&txn, video.id).await {
-                            Ok(count) => deleted_files += count,
-                            Err(e) => warn!("删除番剧视频文件失败: video_id={} - {:?}", video.id, e),
-                        }
-                    }
-
-                    info!("番剧 {} 删除完成，共删除 {} 个文件", bangumi.name, deleted_files);
-                } else {
-                    // 删除番剧相关的季度文件夹，而不是删除整个番剧基础目录
-                    info!("开始删除番剧 {} 的相关文件夹", bangumi.name);
-
-                    // 获取所有相关的视频记录来确定需要删除的具体文件夹
-                    let mut deleted_folders = std::collections::HashSet::new();
-                    let mut total_deleted_size = 0u64;
-                    let normalized_base_path = normalize_file_path(base_path).trim_end_matches('/').to_string();
-
-                    for video in &orphaned_videos {
-                        let normalized_video_path = normalize_file_path(&video.path).trim_end_matches('/').to_string();
-                        if normalized_video_path == normalized_base_path {
-                            warn!("检测到视频路径等于基础目录，按文件方式删除避免误删: {}", video.path);
-                            if let Err(e) = delete_video_files_from_pages(&txn, video.id).await {
-                                warn!("删除番剧视频文件失败: video_id={} - {:?}", video.id, e);
-                            }
-                            continue;
-                        }
-
-                        // 对于每个视频，删除其对应的文件夹
-                        let video_path = std::path::Path::new(&video.path);
-
-                        if video_path.exists() && !deleted_folders.contains(&video.path) {
-                            match get_directory_size(&video.path) {
-                                Ok(size) => {
-                                    let size_mb = size as f64 / 1024.0 / 1024.0;
-                                    info!("删除番剧季度文件夹: {} (大小: {:.2} MB)", video.path, size_mb);
-
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除番剧季度文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除番剧季度文件夹: {} ({:.2} MB)", video.path, size_mb);
-                                        deleted_folders.insert(video.path.clone());
-                                        total_deleted_size += size;
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("无法计算文件夹大小: {} - {}", video.path, e);
-                                    if let Err(e) = std::fs::remove_dir_all(&video.path) {
-                                        error!("删除番剧季度文件夹失败: {} - {}", video.path, e);
-                                    } else {
-                                        info!("成功删除番剧季度文件夹: {}", video.path);
-                                        deleted_folders.insert(video.path.clone());
-
-                                        // 删除后清理空的父目录
-                                        cleanup_empty_parent_dirs(&video.path, base_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !deleted_folders.is_empty() {
-                        let total_size_mb = total_deleted_size as f64 / 1024.0 / 1024.0;
-                        info!(
-                            "番剧 {} 删除完成，共删除 {} 个文件夹，总大小: {:.2} MB",
-                            bangumi.name,
-                            deleted_folders.len(),
-                            total_size_mb
-                        );
-                    } else {
-                        info!("番剧 {} 没有找到需要删除的本地文件夹", bangumi.name);
-                    }
-                }
-
-                // 兜底清理基础目录下已空的上层目录，再尝试删除基础目录本身。
-                cleanup_empty_subdirs_under(base_path);
-                cleanup_empty_dir_if_empty(base_path, "番剧基础目录");
+                cleanup_plan = Some(
+                    build_local_source_cleanup_plan(
+                        &txn,
+                        format!("番剧 {}", bangumi.name),
+                        bangumi.path.clone(),
+                        "番剧基础目录",
+                        bangumi.flat_folder,
+                        &orphaned_videos,
+                    )
+                    .await?,
+                );
             }
 
-            // 删除孤立视频的页面数据
-            for video in &orphaned_videos {
-                page::Entity::delete_many()
-                    .filter(page::Column::VideoId.eq(video.id))
-                    .exec(&txn)
-                    .await?;
-            }
-
-            // 删除孤立视频记录
-            if !orphaned_videos.is_empty() {
-                video::Entity::delete_many()
-                    .filter(video::Column::Id.is_in(orphaned_videos.iter().map(|v| v.id)))
-                    .exec(&txn)
-                    .await?;
-            }
+            delete_orphaned_videos_from_db(&txn, &orphaned_videos).await?;
 
             // 删除数据库中的记录
             video_source::Entity::delete_by_id(id).exec(&txn).await?;
@@ -5318,12 +5520,18 @@ pub async fn delete_video_source_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
+    notify_videos_changed();
 
     // 事务提交后，清除断点信息（如果是删除投稿源）
     if let Some(upper_id) = upper_id_to_clear {
         if let Err(e) = crate::utils::submission_checkpoint::clear_submission_checkpoint(&db, upper_id).await {
             warn!("清除UP主 {} 断点信息失败: {}", upper_id, e);
         }
+    }
+
+    if let Some(plan) = cleanup_plan {
+        execute_local_source_cleanup_plan(db.as_ref(), plan).await;
     }
 
     Ok(result)
@@ -5497,6 +5705,7 @@ pub async fn update_video_source_scan_deleted_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
     Ok(result)
 }
 
@@ -5551,13 +5760,9 @@ pub async fn update_video_source_download_options_internal(
                 if params.collection_aggregate_enabled == Some(true)
                     || collection.aggregate_season_number.unwrap_or(0) <= 0
                 {
-                    resolve_collection_aggregate_season_number(
-                        collection.m_id,
-                        collection.s_id,
-                        collection.r#type,
-                    )
-                    .await
-                    .or(collection.aggregate_season_number)
+                    resolve_collection_aggregate_season_number(collection.m_id, collection.s_id, collection.r#type)
+                        .await
+                        .or(collection.aggregate_season_number)
                 } else {
                     collection.aggregate_season_number
                 }
@@ -5947,6 +6152,7 @@ pub async fn update_video_source_download_options_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
     Ok(result)
 }
 
@@ -6362,6 +6568,7 @@ pub async fn update_submission_selected_videos(
     submission::Entity::update(update_model).exec(&txn).await?;
 
     txn.commit().await?;
+    notify_video_sources_changed();
 
     let mut backfill_targets = newly_selected_videos.clone();
     if !selection_changed && !reselected_deleted_videos.is_empty() {
@@ -6852,6 +7059,8 @@ pub async fn reset_video_source_path_internal(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
+    notify_videos_changed();
     Ok(result)
 }
 
@@ -10339,11 +10548,7 @@ pub async fn stream_logs(
         }
     };
 
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(StdDuration::from_secs(15))
-            .text("keepalive"),
-    )
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keepalive"))
 }
 
 /// 获取历史日志
@@ -10703,6 +10908,10 @@ pub struct CancelQueueTaskResponse {
     )
 )]
 pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiError> {
+    Ok(ApiResponse::ok(load_queue_status_response().await))
+}
+
+async fn load_queue_status_response() -> QueueStatusResponse {
     use crate::task::{ADD_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, TASK_CONTROLLER, VIDEO_DELETE_TASK_QUEUE};
 
     // 获取扫描状态
@@ -10779,7 +10988,7 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
         })
         .collect();
 
-    let response = QueueStatusResponse {
+    QueueStatusResponse {
         is_scanning,
         delete_queue: QueueInfo {
             length: delete_queue_length,
@@ -10803,9 +11012,7 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
             update_tasks: config_update_tasks,
             reload_tasks: config_reload_tasks,
         },
-    };
-
-    Ok(ApiResponse::ok(response))
+    }
 }
 
 /// 取消队列中的待处理任务
@@ -11105,9 +11312,7 @@ pub async fn proxy_image(
     let now = Utc::now();
     maybe_cleanup_proxy_image_cache(db.as_ref(), now).await;
 
-    if let Some((cached_content_type, cached_etag)) =
-        load_proxy_image_cache_meta(db.as_ref(), &url, now).await
-    {
+    if let Some((cached_content_type, cached_etag)) = load_proxy_image_cache_meta(db.as_ref(), &url, now).await {
         if if_none_match_hit(&headers, &cached_etag) {
             debug!(
                 "图片代理返回304(缓存命中): url={}, etag={}",
@@ -14632,7 +14837,12 @@ pub async fn test_notification_handler(
     let mut config = crate::config::reload_config().notification;
 
     // 应用临时测试覆盖参数（仅本次请求生效，不写入数据库）
-    if let Some(active_channel) = request.active_channel.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(active_channel) = request
+        .active_channel
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         config.active_channel = active_channel.to_string();
     }
     if let Some(serverchan_key) = request.serverchan_key.as_ref() {
@@ -14651,7 +14861,12 @@ pub async fn test_notification_handler(
         let v = wecom_webhook_url.trim();
         config.wecom_webhook_url = if v.is_empty() { None } else { Some(v.to_string()) };
     }
-    if let Some(wecom_msgtype) = request.wecom_msgtype.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(wecom_msgtype) = request
+        .wecom_msgtype
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         config.wecom_msgtype = wecom_msgtype.to_string();
     }
     if let Some(wecom_mention_all) = request.wecom_mention_all {
@@ -14674,7 +14889,12 @@ pub async fn test_notification_handler(
         let v = webhook_bearer_token.trim();
         config.webhook_bearer_token = if v.is_empty() { None } else { Some(v.to_string()) };
     }
-    if let Some(webhook_format) = request.webhook_format.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(webhook_format) = request
+        .webhook_format
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         config.webhook_format = webhook_format.to_ascii_lowercase();
     }
     if let Some(webhook_custom_body) = request.webhook_custom_body.as_ref() {
@@ -15362,12 +15582,10 @@ pub async fn update_video_source_keyword_filters(
         .map(str::to_string);
 
     if let Some(ref date) = published_after {
-        NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
+        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
     }
     if let Some(ref date) = published_before {
-        NaiveDate::parse_from_str(date, "%Y-%m-%d")
-            .map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
+        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
     }
     if let (Some(ref start), Some(ref end)) = (published_after.as_ref(), published_before.as_ref()) {
         if start > end {
@@ -15638,6 +15856,7 @@ pub async fn update_video_source_keyword_filters(
     };
 
     txn.commit().await?;
+    notify_video_sources_changed();
 
     if let Some((submission_record, whitelist_keywords, has_complex_regex)) = submission_whitelist_backfill_job {
         if whitelist_keywords.iter().any(|k| !k.trim().is_empty()) {
@@ -16190,16 +16409,19 @@ pub async fn ai_rename_history(
     .await;
 
     match result {
-        Ok(batch_result) => Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
-            success: true,
-            renamed_count: batch_result.renamed_count,
-            skipped_count: batch_result.skipped_count,
-            failed_count: batch_result.failed_count,
-            message: format!(
-                "批量重命名完成：重命名 {} 个，跳过 {} 个，失败 {} 个",
-                batch_result.renamed_count, batch_result.skipped_count, batch_result.failed_count
-            ),
-        })),
+        Ok(batch_result) => {
+            notify_videos_changed();
+            Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {
+                success: true,
+                renamed_count: batch_result.renamed_count,
+                skipped_count: batch_result.skipped_count,
+                failed_count: batch_result.failed_count,
+                message: format!(
+                    "批量重命名完成：重命名 {} 个，跳过 {} 个，失败 {} 个",
+                    batch_result.renamed_count, batch_result.skipped_count, batch_result.failed_count
+                ),
+            }))
+        }
         Err(e) => {
             error!("[{}] 批量重命名失败: {}", source_key, e);
             Ok(ApiResponse::ok(crate::api::response::BatchRenameResponse {

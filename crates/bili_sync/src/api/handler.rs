@@ -1207,9 +1207,17 @@ pub async fn get_video_sources(
     }))
 }
 
-async fn resolve_collection_aggregate_season_number(up_id: i64, s_id: i64, collection_type: i32) -> Option<i32> {
-    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(up_id, s_id, collection_type)
-        .await
+async fn resolve_collection_aggregate_season_number(
+    up_id: i64,
+    s_id: i64,
+    collection_type: i32,
+) -> Option<i32> {
+    match crate::utils::collection_aggregate::fetch_absolute_collection_season_number(
+        up_id,
+        s_id,
+        collection_type,
+    )
+    .await
     {
         Ok(Some(season_number)) => Some(season_number.max(1)),
         Ok(None) => {
@@ -1653,20 +1661,8 @@ pub async fn get_video(
         .one(db.as_ref())
         .await?;
 
-    let Some((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
-        season_id,
-        source_type,
-    )) = raw_video
+    let Some((_id, bvid, name, upper_name, path, category, download_status, cover, valid, is_charge_video, season_id, source_type)) =
+        raw_video
     else {
         return Err(InnerApiError::NotFound(id).into());
     };
@@ -3010,7 +3006,11 @@ pub async fn add_video_source_internal(
                     .map(|cred| {
                         format!(
                             "SESSDATA={};bili_jct={};buvid3={};DedeUserID={};ac_time_value={}",
-                            cred.sessdata, cred.bili_jct, cred.buvid3, cred.dedeuserid, cred.ac_time_value
+                            cred.sessdata,
+                            cred.bili_jct,
+                            cred.buvid3,
+                            cred.dedeuserid,
+                            cred.ac_time_value
                         )
                     })
                     .unwrap_or_default();
@@ -3937,7 +3937,10 @@ pub async fn delete_video_source(
                     task_id,
                 };
                 crate::task::enqueue_delete_task(delete_task, &db).await?;
-                info!("直删遇到数据库锁，已自动回退为队列处理: {} ID={}", source_type, id);
+                info!(
+                    "直删遇到数据库锁，已自动回退为队列处理: {} ID={}",
+                    source_type, id
+                );
                 if !crate::task::DELETE_TASK_QUEUE.is_processing() {
                     let db_clone = db.clone();
                     tokio::spawn(async move {
@@ -4250,7 +4253,10 @@ async fn cleanup_empty_season_dirs(
     }
 }
 
-async fn cleanup_root_metadata_if_no_media(root_dir: &std::path::Path, deleted_count: &mut usize) {
+async fn cleanup_root_metadata_if_no_media(
+    root_dir: &std::path::Path,
+    deleted_count: &mut usize,
+) {
     if !root_dir.exists() || dir_has_media_files_recursive(root_dir) {
         return;
     }
@@ -5282,9 +5288,13 @@ pub async fn update_video_source_download_options_internal(
                 if params.collection_aggregate_enabled == Some(true)
                     || collection.aggregate_season_number.unwrap_or(0) <= 0
                 {
-                    resolve_collection_aggregate_season_number(collection.m_id, collection.s_id, collection.r#type)
-                        .await
-                        .or(collection.aggregate_season_number)
+                    resolve_collection_aggregate_season_number(
+                        collection.m_id,
+                        collection.s_id,
+                        collection.r#type,
+                    )
+                    .await
+                    .or(collection.aggregate_season_number)
                 } else {
                     collection.aggregate_season_number
                 }
@@ -10066,7 +10076,11 @@ pub async fn stream_logs(
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)).text("keepalive"))
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(StdDuration::from_secs(15))
+            .text("keepalive"),
+    )
 }
 
 /// 获取历史日志
@@ -10828,7 +10842,9 @@ pub async fn proxy_image(
     let now = Utc::now();
     maybe_cleanup_proxy_image_cache(db.as_ref(), now).await;
 
-    if let Some((cached_content_type, cached_etag)) = load_proxy_image_cache_meta(db.as_ref(), &url, now).await {
+    if let Some((cached_content_type, cached_etag)) =
+        load_proxy_image_cache_meta(db.as_ref(), &url, now).await
+    {
         if if_none_match_hit(&headers, &cached_etag) {
             debug!(
                 "图片代理返回304(缓存命中): url={}, etag={}",
@@ -14353,12 +14369,7 @@ pub async fn test_notification_handler(
     let mut config = crate::config::reload_config().notification;
 
     // 应用临时测试覆盖参数（仅本次请求生效，不写入数据库）
-    if let Some(active_channel) = request
-        .active_channel
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(active_channel) = request.active_channel.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         config.active_channel = active_channel.to_string();
     }
     if let Some(serverchan_key) = request.serverchan_key.as_ref() {
@@ -14377,12 +14388,7 @@ pub async fn test_notification_handler(
         let v = wecom_webhook_url.trim();
         config.wecom_webhook_url = if v.is_empty() { None } else { Some(v.to_string()) };
     }
-    if let Some(wecom_msgtype) = request
-        .wecom_msgtype
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(wecom_msgtype) = request.wecom_msgtype.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         config.wecom_msgtype = wecom_msgtype.to_string();
     }
     if let Some(wecom_mention_all) = request.wecom_mention_all {
@@ -14405,12 +14411,7 @@ pub async fn test_notification_handler(
         let v = webhook_bearer_token.trim();
         config.webhook_bearer_token = if v.is_empty() { None } else { Some(v.to_string()) };
     }
-    if let Some(webhook_format) = request
-        .webhook_format
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(webhook_format) = request.webhook_format.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         config.webhook_format = webhook_format.to_ascii_lowercase();
     }
     if let Some(webhook_custom_body) = request.webhook_custom_body.as_ref() {
@@ -15098,10 +15099,12 @@ pub async fn update_video_source_keyword_filters(
         .map(str::to_string);
 
     if let Some(ref date) = published_after {
-        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
+        NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| anyhow!("投稿起始日期格式无效，必须为 YYYY-MM-DD"))?;
     }
     if let Some(ref date) = published_before {
-        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
+        NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| anyhow!("投稿截止日期格式无效，必须为 YYYY-MM-DD"))?;
     }
     if let (Some(ref start), Some(ref end)) = (published_after.as_ref(), published_before.as_ref()) {
         if start > end {

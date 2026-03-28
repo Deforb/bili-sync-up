@@ -2088,20 +2088,33 @@
 	}
 
 	function getBatchPathForItem(item: BatchSelectedItem): string {
-		const template = getQuickSubscriptionTemplate(
+		const customPathOrTemplate = batchBasePath.trim();
+		const fallbackTemplate = getQuickSubscriptionTemplate(
 			getSourceTypeFromBatchItem(item) as VideoCategory
 		).trim();
-		if (template && item.name.trim()) {
-			const renderedPath = renderQuickSubscriptionPath(template, item.name).trim();
+		const effectivePathOrTemplate = customPathOrTemplate || fallbackTemplate;
+		if (!effectivePathOrTemplate) {
+			return '';
+		}
+		if (effectivePathOrTemplate.includes('{{') && item.name.trim()) {
+			const renderedPath = renderQuickSubscriptionPath(effectivePathOrTemplate, item.name).trim();
 			if (renderedPath) {
 				return renderedPath;
 			}
 		}
-		return batchBasePath.trim();
+		return effectivePathOrTemplate;
 	}
 
 	function canStartBatchAdd(): boolean {
 		return !!getBatchSelectedTemplate() || !!batchBasePath.trim();
+	}
+
+	function openBatchDialog() {
+		const defaultTemplate = getBatchSelectedTemplate();
+		if (!batchBasePath.trim() || batchBasePath === '/Downloads') {
+			batchBasePath = defaultTemplate || '/Downloads';
+		}
+		batchDialogOpen = true;
 	}
 
 	function selectAllVisible(itemType: string) {
@@ -4895,9 +4908,7 @@
 				<Button
 					size="sm"
 					variant="secondary"
-					onclick={() => {
-						batchDialogOpen = true;
-					}}
+					onclick={openBatchDialog}
 					disabled={batchAdding}
 					class="bg-white text-xs text-blue-600 hover:bg-gray-100 dark:text-blue-700"
 				>
@@ -5075,28 +5086,43 @@
 			</div>
 
 			<div class="space-y-4 p-4">
-				{#if getBatchSelectedTemplate()}
-					<div class="rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30">
-						<p class="text-sm font-medium text-blue-800 dark:text-blue-200">已启用快捷订阅路径模板</p>
-						<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
-							批量添加会按每个源的名称分别套用当前源类型对应的快捷模板，不再共用同一个保存路径。
+				<div>
+					<div class="mb-2 flex items-center justify-between gap-3">
+						<Label for="batch-base-path">本次保存路径 / 路径模板</Label>
+						{#if getBatchSelectedTemplate()}
+							<Button
+								type="button"
+								size="sm"
+								variant="outline"
+								onclick={() => {
+									batchBasePath = getBatchSelectedTemplate();
+								}}
+							>
+								恢复快捷模板
+							</Button>
+						{/if}
+					</div>
+					<Input
+						id="batch-base-path"
+						bind:value={batchBasePath}
+						placeholder={getBatchSelectedTemplate() || '/Downloads'}
+						class="mt-1"
+					/>
+					{#if getBatchSelectedTemplate()}
+						<div class="mt-2 space-y-1 rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30">
+							<p class="text-xs text-blue-700 dark:text-blue-300">
+								已从当前源类型的快捷订阅路径模板带入默认值，本次批量添加可临时改成任意路径或任意模板。
+							</p>
+							<p class="text-xs text-blue-700 dark:text-blue-300">
+								支持 <code>{'{{name}}'}</code> 变量；如果不包含该变量，则所有选中项会使用同一个路径。
+							</p>
+						</div>
+					{:else}
+						<p class="text-muted-foreground mt-1 text-xs">
+							未配置快捷模板时，所有选中的视频源将保存到此路径。支持手动填写 <code>{'{{name}}'}</code> 变量。
 						</p>
-						<code class="mt-2 block break-all rounded bg-white/70 px-2 py-1 text-xs dark:bg-black/20">
-							{getBatchSelectedTemplate()}
-						</code>
-					</div>
-				{:else}
-					<div>
-						<Label for="batch-base-path">基础保存路径</Label>
-						<Input
-							id="batch-base-path"
-							bind:value={batchBasePath}
-							placeholder="/Downloads"
-							class="mt-1"
-						/>
-						<p class="text-muted-foreground mt-1 text-xs">未配置快捷模板时，所有选中的视频源将保存到此路径</p>
-					</div>
-				{/if}
+					{/if}
+				</div>
 
 				{#if getBatchSelectedSourceType() === 'collection'}
 					<div class="space-y-2">

@@ -7593,6 +7593,10 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         bangumi_use_season_structure: config.bangumi_use_season_structure,
         // UP主头像保存路径
         upper_path: config.upper_path.to_string_lossy().to_string(),
+        favorite_quick_subscribe_path: config.favorite_quick_subscribe_path.to_string(),
+        collection_quick_subscribe_path: config.collection_quick_subscribe_path.to_string(),
+        submission_quick_subscribe_path: config.submission_quick_subscribe_path.to_string(),
+        bangumi_quick_subscribe_path: config.bangumi_quick_subscribe_path.to_string(),
         // ffmpeg 路径
         ffmpeg_path: config.ffmpeg_path.clone(),
         // B站凭证信息
@@ -7751,6 +7755,10 @@ pub async fn update_config(
             bangumi_use_season_structure: params.bangumi_use_season_structure,
             // UP主头像保存路径
             upper_path: params.upper_path.clone(),
+            favorite_quick_subscribe_path: params.favorite_quick_subscribe_path.clone(),
+            collection_quick_subscribe_path: params.collection_quick_subscribe_path.clone(),
+            submission_quick_subscribe_path: params.submission_quick_subscribe_path.clone(),
+            bangumi_quick_subscribe_path: params.bangumi_quick_subscribe_path.clone(),
             // ffmpeg 路径
             ffmpeg_path: params.ffmpeg_path.clone(),
             ai_rename_rename_parent_dir: params.ai_rename_rename_parent_dir,
@@ -7848,6 +7856,10 @@ fn config_update_field_display_name(field: &str) -> String {
         "collection_use_season_structure" => Some("合集使用Season目录"),
         "bangumi_use_season_structure" => Some("番剧使用Season目录"),
         "upper_path" => Some("UP头像缓存路径"),
+        "favorite_quick_subscribe_path" => Some("收藏夹快捷订阅路径模板"),
+        "collection_quick_subscribe_path" => Some("合集快捷订阅路径模板"),
+        "submission_quick_subscribe_path" => Some("UP主投稿快捷订阅路径模板"),
+        "bangumi_quick_subscribe_path" => Some("番剧快捷订阅路径模板"),
         "ffmpeg_path" => Some("ffmpeg路径"),
         "bind_address" => Some("服务监听地址"),
         "risk_control.enabled" => Some("风控验证开关"),
@@ -7963,6 +7975,10 @@ pub async fn update_config_internal(
     let original_folder_structure = config.folder_structure.clone();
     let original_collection_folder_mode = config.collection_folder_mode.clone();
     let original_collection_unified_name = config.collection_unified_name.clone();
+    let original_favorite_quick_subscribe_path = config.favorite_quick_subscribe_path.clone();
+    let original_collection_quick_subscribe_path = config.collection_quick_subscribe_path.clone();
+    let original_submission_quick_subscribe_path = config.submission_quick_subscribe_path.clone();
+    let original_bangumi_quick_subscribe_path = config.bangumi_quick_subscribe_path.clone();
 
     // 更新配置字段
     if let Some(video_name) = params.video_name {
@@ -8033,6 +8049,38 @@ pub async fn update_config_internal(
         if !trimmed.is_empty() && trimmed != original_collection_unified_name.as_ref() {
             config.collection_unified_name = Cow::Owned(trimmed.to_string());
             updated_fields.push("collection_unified_name");
+        }
+    }
+
+    if let Some(favorite_quick_subscribe_path) = params.favorite_quick_subscribe_path {
+        let trimmed = favorite_quick_subscribe_path.trim();
+        if trimmed != original_favorite_quick_subscribe_path.as_ref() {
+            config.favorite_quick_subscribe_path = Cow::Owned(trimmed.to_string());
+            updated_fields.push("favorite_quick_subscribe_path");
+        }
+    }
+
+    if let Some(collection_quick_subscribe_path) = params.collection_quick_subscribe_path {
+        let trimmed = collection_quick_subscribe_path.trim();
+        if trimmed != original_collection_quick_subscribe_path.as_ref() {
+            config.collection_quick_subscribe_path = Cow::Owned(trimmed.to_string());
+            updated_fields.push("collection_quick_subscribe_path");
+        }
+    }
+
+    if let Some(submission_quick_subscribe_path) = params.submission_quick_subscribe_path {
+        let trimmed = submission_quick_subscribe_path.trim();
+        if trimmed != original_submission_quick_subscribe_path.as_ref() {
+            config.submission_quick_subscribe_path = Cow::Owned(trimmed.to_string());
+            updated_fields.push("submission_quick_subscribe_path");
+        }
+    }
+
+    if let Some(bangumi_quick_subscribe_path) = params.bangumi_quick_subscribe_path {
+        let trimmed = bangumi_quick_subscribe_path.trim();
+        if trimmed != original_bangumi_quick_subscribe_path.as_ref() {
+            config.bangumi_quick_subscribe_path = Cow::Owned(trimmed.to_string());
+            updated_fields.push("bangumi_quick_subscribe_path");
         }
     }
 
@@ -8868,6 +8916,38 @@ pub async fn update_config_internal(
                         .update_config_item(
                             "collection_unified_name",
                             serde_json::to_value(&config.collection_unified_name)?,
+                        )
+                        .await
+                }
+                "favorite_quick_subscribe_path" => {
+                    manager
+                        .update_config_item(
+                            "favorite_quick_subscribe_path",
+                            serde_json::to_value(&config.favorite_quick_subscribe_path)?,
+                        )
+                        .await
+                }
+                "collection_quick_subscribe_path" => {
+                    manager
+                        .update_config_item(
+                            "collection_quick_subscribe_path",
+                            serde_json::to_value(&config.collection_quick_subscribe_path)?,
+                        )
+                        .await
+                }
+                "submission_quick_subscribe_path" => {
+                    manager
+                        .update_config_item(
+                            "submission_quick_subscribe_path",
+                            serde_json::to_value(&config.submission_quick_subscribe_path)?,
+                        )
+                        .await
+                }
+                "bangumi_quick_subscribe_path" => {
+                    manager
+                        .update_config_item(
+                            "bangumi_quick_subscribe_path",
+                            serde_json::to_value(&config.bangumi_quick_subscribe_path)?,
                         )
                         .await
                 }

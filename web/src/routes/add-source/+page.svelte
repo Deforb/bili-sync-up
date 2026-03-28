@@ -22,6 +22,7 @@
 		BangumiSourceListResponse,
 		VideoSourcesResponse,
 		ValidateFavoriteResponse,
+		ConfigResponse,
 		UserCollectionInfo,
 		AddVideoSourceRequest,
 		KeywordFilterMode
@@ -47,6 +48,11 @@
 	let upId = '';
 	let name = '';
 	let path = '';
+	let favoriteQuickSubscribePathTemplate = '';
+	let collectionQuickSubscribePathTemplate = '';
+	let submissionQuickSubscribePathTemplate = '';
+	let bangumiQuickSubscribePathTemplate = '';
+	let lastAutoAppliedPath = '';
 	let cover = '';
 	let collectionType = 'season';
 	let collectionAggregateEnabled = false;
@@ -220,6 +226,67 @@
 		return sourceTypeLabelMap[type] ?? type;
 	}
 
+	function getQuickSubscriptionTemplate(type: VideoCategory): string {
+		switch (type) {
+			case 'favorite':
+				return favoriteQuickSubscribePathTemplate;
+			case 'collection':
+				return collectionQuickSubscribePathTemplate;
+			case 'submission':
+				return submissionQuickSubscribePathTemplate;
+			case 'bangumi':
+				return bangumiQuickSubscribePathTemplate;
+			default:
+				return '';
+		}
+	}
+
+	function sanitizeQuickSubscriptionName(value: string): string {
+		return value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '_');
+	}
+
+	function renderQuickSubscriptionPath(template: string, sourceName: string): string {
+		const safeName = sanitizeQuickSubscriptionName(sourceName);
+		return template.replace(/\{\{\s*name\s*\}\}/g, safeName);
+	}
+
+	function applyQuickSubscriptionPath(
+		type: VideoCategory,
+		sourceName: string,
+		force = false
+	): boolean {
+		if (isMergingBangumi) return false;
+
+		const template = getQuickSubscriptionTemplate(type).trim();
+		if (!template || !sourceName.trim()) return false;
+		if (!force && path.trim() && path !== lastAutoAppliedPath) return false;
+
+		const nextPath = renderQuickSubscriptionPath(template, sourceName).trim();
+		if (!nextPath) return false;
+
+		path = nextPath;
+		lastAutoAppliedPath = nextPath;
+		return true;
+	}
+
+	function handleNameInput() {
+		applyQuickSubscriptionPath(sourceType, name, false);
+	}
+
+	async function loadQuickSubscriptionTemplates() {
+		const response = await runRequest(() => api.getConfig(), {
+			showErrorToast: false,
+			context: '加载快捷订阅路径模板失败'
+		});
+		if (!response) return;
+
+		const config: ConfigResponse = response.data;
+		favoriteQuickSubscribePathTemplate = config.favorite_quick_subscribe_path || '';
+		collectionQuickSubscribePathTemplate = config.collection_quick_subscribe_path || '';
+		submissionQuickSubscribePathTemplate = config.submission_quick_subscribe_path || '';
+		bangumiQuickSubscribePathTemplate = config.bangumi_quick_subscribe_path || '';
+	}
+
 	// 订阅的合集相关
 	let subscribedCollections: UserCollectionInfo[] = [];
 	let loadingSubscribedCollections = false;
@@ -260,7 +327,7 @@
 			{ label: '主页', href: '/' },
 			{ label: '添加视频源', isActive: true }
 		]);
-		await loadExistingVideoSources();
+		await Promise.all([loadExistingVideoSources(), loadQuickSubscriptionTemplates()]);
 	});
 
 	onDestroy(() => {
@@ -422,6 +489,7 @@
 					sourceId = result.mid.toString();
 					name = cleanTitle(result.title);
 					selectedUpName = cleanTitle(result.title);
+					applyQuickSubscriptionPath('submission', name, true);
 					// 打开投稿选择对话框
 					showSubmissionSelection = true;
 				}
@@ -430,6 +498,7 @@
 				if (result.season_id) {
 					sourceId = result.season_id;
 					name = cleanTitle(result.title);
+					applyQuickSubscriptionPath('bangumi', name, true);
 				}
 				break;
 			case 'favorite':
@@ -838,6 +907,7 @@
 			upId = '';
 			name = '';
 			path = '/Downloads';
+			lastAutoAppliedPath = '';
 			downloadAllSeasons = false;
 			collectionType = 'season';
 			collectionAggregateEnabled = false;
@@ -921,6 +991,7 @@
 
 		sourceId = favorite.id.toString();
 		name = favoriteName;
+		applyQuickSubscriptionPath('favorite', name, true);
 		favoriteValidationResult = {
 			valid: true,
 			fid: Number(favorite.id),
@@ -948,6 +1019,7 @@
 		// 使用完整ID（id字段），而不是短ID（fid字段）
 		sourceId = favorite.id.toString();
 		name = favorite.title;
+		applyQuickSubscriptionPath('favorite', name, true);
 		favoriteValidationResult = {
 			valid: true,
 			fid: Number(favorite.id),
@@ -1043,6 +1115,7 @@
 		if (result.data.valid && !name) {
 			// 如果验证成功且用户还没有填写名称，自动填入收藏夹标题
 			name = result.data.title;
+			applyQuickSubscriptionPath('favorite', name, false);
 		}
 	}
 
@@ -1132,6 +1205,7 @@
 
 		sourceId = collection.sid;
 		name = collection.name;
+		applyQuickSubscriptionPath('collection', name, true);
 		cover = collection.cover || '';
 		collectionType = collection.collection_type;
 		isManualInput = false; // 从列表选择，不是手动输入
@@ -1378,6 +1452,7 @@
 	// 监听sourceType变化，重置手动输入标志和清空所有缓存
 	$: if (sourceType) {
 		isManualInput = false;
+		lastAutoAppliedPath = '';
 		// 清空搜索相关状态
 		searchResults = [];
 		searchKeyword = '';
@@ -1541,6 +1616,7 @@
 				sourceId = following.mid.toString();
 				name = following.name;
 				selectedUpName = following.name;
+				applyQuickSubscriptionPath('submission', name, true);
 				// 打开投稿选择对话框
 				showSubmissionSelection = true;
 				toast.success('已填充UP主信息');
@@ -1584,6 +1660,7 @@
 			sourceType = 'favorite';
 			sourceId = collection.sid;
 			name = collection.name;
+			applyQuickSubscriptionPath('favorite', name, true);
 			// 收藏夹不需要 upId 和 cover
 			upId = '';
 			cover = '';
@@ -1594,6 +1671,7 @@
 			sourceType = 'collection';
 			sourceId = collection.sid;
 			name = collection.name;
+			applyQuickSubscriptionPath('collection', name, true);
 			cover = collection.cover || '';
 			upId = collection.up_mid.toString();
 			collectionType = collection.collection_type;
@@ -2002,6 +2080,30 @@
 		console.log('✅ New empty Map created');
 	}
 
+	function getBatchSelectedTemplate(): string {
+		const selectedSourceType = getBatchSelectedSourceType();
+		return selectedSourceType
+			? getQuickSubscriptionTemplate(selectedSourceType as VideoCategory).trim()
+			: '';
+	}
+
+	function getBatchPathForItem(item: BatchSelectedItem): string {
+		const template = getQuickSubscriptionTemplate(
+			getSourceTypeFromBatchItem(item) as VideoCategory
+		).trim();
+		if (template && item.name.trim()) {
+			const renderedPath = renderQuickSubscriptionPath(template, item.name).trim();
+			if (renderedPath) {
+				return renderedPath;
+			}
+		}
+		return batchBasePath.trim();
+	}
+
+	function canStartBatchAdd(): boolean {
+		return !!getBatchSelectedTemplate() || !!batchBasePath.trim();
+	}
+
 	function selectAllVisible(itemType: string) {
 		switch (itemType) {
 			case 'search':
@@ -2113,7 +2215,7 @@
 						source_type: getSourceTypeFromBatchItem(item),
 						source_id: getSourceIdFromBatchItem(item),
 						name: item.name,
-						path: batchBasePath
+						path: getBatchPathForItem(item)
 					};
 
 					// 添加特定类型的额外参数
@@ -2718,6 +2820,7 @@
 								id="name"
 								bind:value={name}
 								placeholder="请输入视频源名称"
+								oninput={handleNameInput}
 								required
 								disabled={isMergingBangumi || batchMode}
 							/>
@@ -2730,37 +2833,62 @@
 
 						<!-- 保存路径 -->
 						<div class="space-y-2">
-							<div class="flex items-center gap-1">
-								<Label for="path">保存路径</Label>
-								<div class="group relative">
-									<InfoIcon class="text-muted-foreground h-4 w-4 cursor-help" />
-									<div
-										class="bg-popover absolute bottom-full left-0 z-50 mb-2 hidden w-72 rounded-md border p-3 text-sm shadow-md group-hover:block"
-									>
-										<p class="mb-1 font-medium">Docker 路径说明</p>
-										<p class="text-muted-foreground text-xs">
-											如果使用 Docker 部署并设置了卷映射，请填写容器内路径。
-										</p>
-										<p class="text-muted-foreground mt-1 text-xs">
-											例如映射 <code class="bg-muted rounded px-1">/volume1/Videos:/Downloads</code>
-										</p>
-										<p class="text-muted-foreground text-xs">
-											则应填写 <code class="bg-muted rounded px-1">/Downloads</code>
-										</p>
+							<div class="flex items-center justify-between gap-2">
+								<div class="flex items-center gap-1">
+									<Label for="path">保存路径</Label>
+									<div class="group relative">
+										<InfoIcon class="text-muted-foreground h-4 w-4 cursor-help" />
+										<div
+											class="bg-popover absolute bottom-full left-0 z-50 mb-2 hidden w-72 rounded-md border p-3 text-sm shadow-md group-hover:block"
+										>
+											<p class="mb-1 font-medium">Docker 路径说明</p>
+											<p class="text-muted-foreground text-xs">
+												如果使用 Docker 部署并设置了卷映射，请填写容器内路径。
+											</p>
+											<p class="text-muted-foreground mt-1 text-xs">
+												例如映射 <code class="bg-muted rounded px-1">/volume1/Videos:/Downloads</code>
+											</p>
+											<p class="text-muted-foreground text-xs">
+												则应填写 <code class="bg-muted rounded px-1">/Downloads</code>
+											</p>
+										</div>
 									</div>
 								</div>
+								{#if getQuickSubscriptionTemplate(sourceType).trim() && !batchMode}
+									<Button
+										type="button"
+										size="sm"
+										variant="outline"
+										disabled={!name.trim() || isMergingBangumi}
+										onclick={() => applyQuickSubscriptionPath(sourceType, name, true)}
+									>
+										套用快捷模板
+									</Button>
+								{/if}
 							</div>
 							<Input
 								id="path"
 								bind:value={path}
 								placeholder="例如：D:/Videos/Bilibili"
+								oninput={() => {
+									if (path !== lastAutoAppliedPath) {
+										lastAutoAppliedPath = '';
+									}
+								}}
 								required
 								disabled={isMergingBangumi}
 							/>
 							{#if isMergingBangumi}
 								<p class="text-xs text-purple-600">合并时自动沿用目标番剧源的保存路径</p>
 							{:else}
-								<p class="text-muted-foreground text-sm">请输入绝对路径</p>
+								<div class="space-y-1">
+									<p class="text-muted-foreground text-sm">请输入绝对路径</p>
+									{#if getQuickSubscriptionTemplate(sourceType).trim() && !batchMode}
+										<p class="text-muted-foreground text-xs">
+											已配置快捷路径模板，支持 <code>{'{{name}}'}</code> 变量。选择源后会自动带入，也可继续手动修改。
+										</p>
+									{/if}
+								</div>
 							{/if}
 						</div>
 
@@ -4947,16 +5075,28 @@
 			</div>
 
 			<div class="space-y-4 p-4">
-				<div>
-					<Label for="batch-base-path">基础保存路径</Label>
-					<Input
-						id="batch-base-path"
-						bind:value={batchBasePath}
-						placeholder="/Downloads"
-						class="mt-1"
-					/>
-					<p class="text-muted-foreground mt-1 text-xs">所有选中的视频源将保存到此路径</p>
-				</div>
+				{#if getBatchSelectedTemplate()}
+					<div class="rounded-md border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30">
+						<p class="text-sm font-medium text-blue-800 dark:text-blue-200">已启用快捷订阅路径模板</p>
+						<p class="mt-1 text-xs text-blue-600 dark:text-blue-300">
+							批量添加会按每个源的名称分别套用当前源类型对应的快捷模板，不再共用同一个保存路径。
+						</p>
+						<code class="mt-2 block break-all rounded bg-white/70 px-2 py-1 text-xs dark:bg-black/20">
+							{getBatchSelectedTemplate()}
+						</code>
+					</div>
+				{:else}
+					<div>
+						<Label for="batch-base-path">基础保存路径</Label>
+						<Input
+							id="batch-base-path"
+							bind:value={batchBasePath}
+							placeholder="/Downloads"
+							class="mt-1"
+						/>
+						<p class="text-muted-foreground mt-1 text-xs">未配置快捷模板时，所有选中的视频源将保存到此路径</p>
+					</div>
+				{/if}
 
 				{#if getBatchSelectedSourceType() === 'collection'}
 					<div class="space-y-2">
@@ -4993,7 +5133,7 @@
 								<div class="min-w-0 flex-1">
 									<div class="truncate font-medium">{item.name}</div>
 									<div class="text-muted-foreground truncate text-xs">
-										{batchBasePath}
+										{getBatchPathForItem(item)}
 									</div>
 								</div>
 								<span class="bg-background ml-2 rounded px-2 py-1 text-xs">
@@ -5016,7 +5156,7 @@
 				>
 					取消
 				</Button>
-				<Button onclick={handleBatchAdd} disabled={batchAdding || !batchBasePath.trim()}>
+				<Button onclick={handleBatchAdd} disabled={batchAdding || !canStartBatchAdd()}>
 					{batchAdding ? '添加中...' : '开始添加'}
 				</Button>
 			</div>

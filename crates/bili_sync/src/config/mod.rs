@@ -113,6 +113,10 @@ fn default_upper_path() -> PathBuf {
     CONFIG_DIR.join("upper_face")
 }
 
+fn default_quick_subscribe_path_template() -> Cow<'static, str> {
+    Cow::Borrowed("")
+}
+
 fn default_ffmpeg_path() -> String {
     String::new()
 }
@@ -182,6 +186,14 @@ pub struct Config {
     pub interval: u64,
     #[serde(default = "default_upper_path")]
     pub upper_path: PathBuf,
+    #[serde(default = "default_quick_subscribe_path_template")]
+    pub favorite_quick_subscribe_path: Cow<'static, str>,
+    #[serde(default = "default_quick_subscribe_path_template")]
+    pub collection_quick_subscribe_path: Cow<'static, str>,
+    #[serde(default = "default_quick_subscribe_path_template")]
+    pub submission_quick_subscribe_path: Cow<'static, str>,
+    #[serde(default = "default_quick_subscribe_path_template")]
+    pub bangumi_quick_subscribe_path: Cow<'static, str>,
     /// 可选的 ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     #[serde(default = "default_ffmpeg_path")]
     pub ffmpeg_path: String,
@@ -653,6 +665,10 @@ impl Clone for Config {
             collection_unified_name: self.collection_unified_name.clone(),
             interval: self.interval,
             upper_path: self.upper_path.clone(),
+            favorite_quick_subscribe_path: self.favorite_quick_subscribe_path.clone(),
+            collection_quick_subscribe_path: self.collection_quick_subscribe_path.clone(),
+            submission_quick_subscribe_path: self.submission_quick_subscribe_path.clone(),
+            bangumi_quick_subscribe_path: self.bangumi_quick_subscribe_path.clone(),
             ffmpeg_path: self.ffmpeg_path.clone(),
             nfo_time_type: self.nfo_time_type.clone(),
             nfo_config: self.nfo_config.clone(),
@@ -697,6 +713,10 @@ impl Default for Config {
             collection_unified_name: default_collection_unified_name(),
             interval: 1200,
             upper_path: CONFIG_DIR.join("upper_face"),
+            favorite_quick_subscribe_path: default_quick_subscribe_path_template(),
+            collection_quick_subscribe_path: default_quick_subscribe_path_template(),
+            submission_quick_subscribe_path: default_quick_subscribe_path_template(),
+            bangumi_quick_subscribe_path: default_quick_subscribe_path_template(),
             ffmpeg_path: default_ffmpeg_path(),
             nfo_time_type: NFOTimeType::FavTime,
             nfo_config: NFOConfig::default(),

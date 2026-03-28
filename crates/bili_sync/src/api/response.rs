@@ -464,6 +464,14 @@ pub struct ConfigResponse {
     pub bangumi_use_season_structure: bool,
     // UP主头像保存路径
     pub upper_path: String,
+    // 添加源页：收藏夹快捷订阅路径模板
+    pub favorite_quick_subscribe_path: String,
+    // 添加源页：合集快捷订阅路径模板
+    pub collection_quick_subscribe_path: String,
+    // 添加源页：UP主投稿快捷订阅路径模板
+    pub submission_quick_subscribe_path: String,
+    // 添加源页：番剧快捷订阅路径模板
+    pub bangumi_quick_subscribe_path: String,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
     // B站凭证信息

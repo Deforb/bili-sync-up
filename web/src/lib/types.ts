@@ -337,6 +337,11 @@ export interface ConfigResponse {
 	};
 	// UP主头像保存路径
 	upper_path?: string;
+	// 添加源页快捷订阅路径模板
+	favorite_quick_subscribe_path?: string;
+	collection_quick_subscribe_path?: string;
+	submission_quick_subscribe_path?: string;
+	bangumi_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置
@@ -453,6 +458,11 @@ export interface UpdateConfigRequest {
 	bangumi_use_season_structure?: boolean;
 	// UP主头像保存路径
 	upper_path?: string;
+	// 添加源页快捷订阅路径模板
+	favorite_quick_subscribe_path?: string;
+	collection_quick_subscribe_path?: string;
+	submission_quick_subscribe_path?: string;
+	bangumi_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置

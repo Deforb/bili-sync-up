@@ -40,7 +40,6 @@ use crate::api::handler::{
     get_latest_ingests,
     get_log_files,
     get_logs,
-    stream_logs,
     get_notification_config,
     get_notification_status,
     get_queue_status,
@@ -57,7 +56,6 @@ use crate::api::handler::{
     get_video_source_keyword_filters,
     get_video_sources,
     get_videos,
-    stream_videos,
     migrate_config_schema,
     pause_scanning_endpoint,
     poll_qr_status,
@@ -73,6 +71,10 @@ use crate::api::handler::{
     resume_scanning_endpoint,
     search_bilibili,
     setup_auth_token,
+    stream_logs,
+    stream_queue_status,
+    stream_video_sources,
+    stream_videos,
     test_notification_handler,
     test_risk_control_handler,
     update_config,
@@ -84,6 +86,7 @@ use crate::api::handler::{
     update_video_source_enabled,
     update_video_source_keyword_filters,
     update_video_source_scan_deleted,
+    update_video_source_scan_deleted_once,
     update_video_status,
     validate_config,
     validate_favorite,
@@ -154,6 +157,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
     };
     let app = Router::new()
         .route("/api/video-sources", get(get_video_sources))
+        .route("/api/video-sources/live", get(stream_video_sources))
         .route("/api/video-sources", post(add_video_source))
         .route("/api/video-sources/bangumi/list", get(get_bangumi_sources_for_merge))
         .route(
@@ -163,6 +167,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route(
             "/api/video-sources/{source_type}/{id}/scan-deleted",
             put(update_video_source_scan_deleted),
+        )
+        .route(
+            "/api/video-sources/{source_type}/{id}/scan-deleted-once",
+            put(update_video_source_scan_deleted_once),
         )
         .route(
             "/api/video-sources/{source_type}/{id}/download-options",
@@ -194,6 +202,7 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/videos/reset-all", post(reset_all_videos))
         .route("/api/videos/reset-specific-tasks", post(reset_specific_tasks))
         .route("/api/dashboard", get(get_dashboard_data))
+        .route("/api/queue/live", get(stream_queue_status))
         .route("/api/reload-config", post(reload_config))
         .route("/api/config", get(get_config))
         .route("/api/config", put(update_config))

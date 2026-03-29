@@ -176,6 +176,10 @@
 	let cdnSorting = false;
 	let scanDeletedVideos = false;
 	let upperPath = ''; // UP主头像保存路径
+	let favoriteQuickSubscribePath = ''; // 添加源页：收藏夹快捷订阅路径模板
+	let collectionQuickSubscribePath = ''; // 添加源页：合集快捷订阅路径模板
+	let submissionQuickSubscribePath = ''; // 添加源页：UP主投稿快捷订阅路径模板
+	let bangumiQuickSubscribePath = ''; // 添加源页：番剧快捷订阅路径模板
 	let ffmpegPath = ''; // ffmpeg可执行路径（文件或目录）
 
 	// B站凭证设置
@@ -514,6 +518,10 @@
 		cdnSorting = config.cdn_sorting || false;
 		scanDeletedVideos = config.scan_deleted_videos || false;
 		upperPath = config.upper_path || '';
+		favoriteQuickSubscribePath = config.favorite_quick_subscribe_path || '';
+		collectionQuickSubscribePath = config.collection_quick_subscribe_path || '';
+		submissionQuickSubscribePath = config.submission_quick_subscribe_path || '';
+		bangumiQuickSubscribePath = config.bangumi_quick_subscribe_path || '';
 		ffmpegPath = config.ffmpeg_path || '';
 
 		// B站凭证设置
@@ -822,6 +830,10 @@
 			cdn_sorting: cdnSorting,
 			scan_deleted_videos: scanDeletedVideos,
 			upper_path: upperPath,
+			favorite_quick_subscribe_path: favoriteQuickSubscribePath,
+			collection_quick_subscribe_path: collectionQuickSubscribePath,
+			submission_quick_subscribe_path: submissionQuickSubscribePath,
+			bangumi_quick_subscribe_path: bangumiQuickSubscribePath,
 			ffmpeg_path: ffmpegPath,
 			// UP主投稿风控配置
 			large_submission_threshold: largeSubmissionThreshold,
@@ -2970,6 +2982,57 @@
 						placeholder="config/upper_face"
 					/>
 					<p class="text-muted-foreground text-sm">UP主头像和person.nfo文件的保存目录路径</p>
+				</div>
+
+				<div class="space-y-4">
+					<div class="space-y-1">
+						<h4 class="text-sm font-medium">快捷订阅路径模板</h4>
+						<p class="text-muted-foreground text-sm">
+							添加收藏夹、合集、UP主投稿、番剧源时可直接带出保存路径。支持使用 <code>{'{{name}}'}</code>
+							代表源名称。
+						</p>
+					</div>
+
+					<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+						<div class="space-y-2">
+							<Label for="favorite-quick-subscribe-path">收藏夹快捷订阅路径模板</Label>
+							<Input
+								id="favorite-quick-subscribe-path"
+								type="text"
+								bind:value={favoriteQuickSubscribePath}
+								placeholder={'/Downloads/收藏夹/{{name}}'}
+							/>
+						</div>
+
+						<div class="space-y-2">
+							<Label for="collection-quick-subscribe-path">合集快捷订阅路径模板</Label>
+							<Input
+								id="collection-quick-subscribe-path"
+								type="text"
+								bind:value={collectionQuickSubscribePath}
+								placeholder={'/Downloads/合集/{{name}}'}
+							/>
+						</div>
+
+						<div class="space-y-2 md:col-span-2">
+							<Label for="submission-quick-subscribe-path">UP主投稿快捷订阅路径模板</Label>
+							<Input
+								id="submission-quick-subscribe-path"
+								type="text"
+								bind:value={submissionQuickSubscribePath}
+								placeholder={'/Downloads/UP投稿/{{name}}'}
+							/>
+						</div>
+						<div class="space-y-2 md:col-span-2">
+							<Label for="bangumi-quick-subscribe-path">番剧快捷订阅路径模板</Label>
+							<Input
+								id="bangumi-quick-subscribe-path"
+								type="text"
+								bind:value={bangumiQuickSubscribePath}
+								placeholder={'/Downloads/番剧/{{name}}'}
+							/>
+						</div>
+					</div>
 				</div>
 
 				<div class="space-y-2">

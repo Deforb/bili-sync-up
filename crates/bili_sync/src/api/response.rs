@@ -116,6 +116,7 @@ pub struct UpdateVideoSourceScanDeletedResponse {
     pub source_id: i32,
     pub source_type: String,
     pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     pub message: String,
 }
 
@@ -192,6 +193,7 @@ pub struct VideoSource {
     pub enabled: bool,
     pub path: String,
     pub scan_deleted_videos: bool,
+    pub scan_deleted_videos_once: bool,
     // 类型特有的ID字段
     pub f_id: Option<i64>, // 收藏夹ID
     pub s_id: Option<i64>, // 合集ID
@@ -337,7 +339,18 @@ impl From<(i32, String, String, String, String, i32, u32, String, bool)> for Vid
             bool,
         ),
     ) -> Self {
-        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, valid, false))
+        Self::from((
+            id,
+            bvid,
+            name,
+            upper_name,
+            path,
+            category,
+            download_status,
+            cover,
+            valid,
+            false,
+        ))
     }
 }
 
@@ -353,8 +366,19 @@ impl From<(i32, String, String, String, String, i32, u32, String)> for VideoInfo
             u32,
             String,
         ),
-        ) -> Self {
-        Self::from((id, bvid, name, upper_name, path, category, download_status, cover, true, false))
+    ) -> Self {
+        Self::from((
+            id,
+            bvid,
+            name,
+            upper_name,
+            path,
+            category,
+            download_status,
+            cover,
+            true,
+            false,
+        ))
     }
 }
 
@@ -442,6 +466,14 @@ pub struct ConfigResponse {
     pub bangumi_use_season_structure: bool,
     // UP主头像保存路径
     pub upper_path: String,
+    // 添加源页：收藏夹快捷订阅路径模板
+    pub favorite_quick_subscribe_path: String,
+    // 添加源页：合集快捷订阅路径模板
+    pub collection_quick_subscribe_path: String,
+    // 添加源页：UP主投稿快捷订阅路径模板
+    pub submission_quick_subscribe_path: String,
+    // 添加源页：番剧快捷订阅路径模板
+    pub bangumi_quick_subscribe_path: String,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: String,
     // B站凭证信息
@@ -947,9 +979,9 @@ pub struct GetKeywordFiltersResponse {
     pub success: bool,
     pub source_id: i32,
     pub source_type: String,
-    pub blacklist_keywords: Vec<String>, // 黑名单关键词列表
-    pub whitelist_keywords: Vec<String>, // 白名单关键词列表
-    pub case_sensitive: bool,            // 是否区分大小写
+    pub blacklist_keywords: Vec<String>,   // 黑名单关键词列表
+    pub whitelist_keywords: Vec<String>,   // 白名单关键词列表
+    pub case_sensitive: bool,              // 是否区分大小写
     pub min_duration_seconds: Option<i32>, // 最短时长（秒）
     pub max_duration_seconds: Option<i32>, // 最长时长（秒）
     pub published_after: Option<String>,   // 投稿起始日期（YYYY-MM-DD，含当天）

@@ -41,6 +41,7 @@ export interface VideoSource {
 	enabled: boolean;
 	path: string;
 	scan_deleted_videos: boolean;
+	scan_deleted_videos_once: boolean;
 	// 类型特有的ID字段
 	f_id?: number; // 收藏夹ID
 	s_id?: number; // 合集ID
@@ -341,6 +342,11 @@ export interface ConfigResponse {
 	};
 	// UP主头像保存路径
 	upper_path?: string;
+	// 添加源页快捷订阅路径模板
+	favorite_quick_subscribe_path?: string;
+	collection_quick_subscribe_path?: string;
+	submission_quick_subscribe_path?: string;
+	bangumi_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置
@@ -457,6 +463,11 @@ export interface UpdateConfigRequest {
 	bangumi_use_season_structure?: boolean;
 	// UP主头像保存路径
 	upper_path?: string;
+	// 添加源页快捷订阅路径模板
+	favorite_quick_subscribe_path?: string;
+	collection_quick_subscribe_path?: string;
+	submission_quick_subscribe_path?: string;
+	bangumi_quick_subscribe_path?: string;
 	// ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
 	ffmpeg_path?: string;
 	// 风控验证配置
@@ -709,7 +720,8 @@ export interface UpdateVideoSourceEnabledResponse {
 
 // 更新视频源扫描已删除视频设置请求类型
 export interface UpdateVideoSourceScanDeletedRequest {
-	scan_deleted_videos: boolean;
+	scan_deleted_videos?: boolean;
+	scan_deleted_videos_once?: boolean;
 }
 
 // 更新视频源扫描已删除视频设置响应类型
@@ -718,6 +730,7 @@ export interface UpdateVideoSourceScanDeletedResponse {
 	source_id: number;
 	source_type: string;
 	scan_deleted_videos: boolean;
+	scan_deleted_videos_once: boolean;
 	message: string;
 }
 

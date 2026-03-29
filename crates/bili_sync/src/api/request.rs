@@ -108,7 +108,8 @@ pub struct UpdateVideoSourceEnabledRequest {
 // 更新视频源扫描已删除视频设置的请求结构体
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateVideoSourceScanDeletedRequest {
-    pub scan_deleted_videos: bool,
+    pub scan_deleted_videos: Option<bool>,
+    pub scan_deleted_videos_once: Option<bool>,
 }
 
 // 更新视频源下载选项的请求结构体
@@ -270,6 +271,14 @@ pub struct UpdateConfigRequest {
     pub bangumi_use_season_structure: Option<bool>,
     // UP主头像保存路径
     pub upper_path: Option<String>,
+    // 添加源页：收藏夹快捷订阅路径模板
+    pub favorite_quick_subscribe_path: Option<String>,
+    // 添加源页：合集快捷订阅路径模板
+    pub collection_quick_subscribe_path: Option<String>,
+    // 添加源页：UP主投稿快捷订阅路径模板
+    pub submission_quick_subscribe_path: Option<String>,
+    // 添加源页：番剧快捷订阅路径模板
+    pub bangumi_quick_subscribe_path: Option<String>,
     // ffmpeg 路径（可填 ffmpeg.exe 文件路径或其所在目录）
     pub ffmpeg_path: Option<String>,
     // 风控验证配置

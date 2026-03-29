@@ -1280,6 +1280,16 @@ pub async fn send_deepseek_token_expired_notification() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use axum::http::HeaderMap as AxumHeaderMap;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Json;
+    use axum::Router;
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
 
     #[test]
     fn test_wecom_response_success() {
@@ -1363,5 +1373,133 @@ mod tests {
         assert!(NotificationClient::validate_custom_webhook_headers(r#"[]"#).is_err());
         assert!(NotificationClient::validate_custom_webhook_headers(r#"{"Authorization":123}"#).is_err());
         assert!(NotificationClient::validate_custom_webhook_headers(r#"{"Bad Header":"value"}"#).is_err());
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedWebhookRequest {
+        authorization: Option<String>,
+        apikey: Option<String>,
+        x_channel: Option<String>,
+        content_type: Option<String>,
+        body: serde_json::Value,
+    }
+
+    async fn capture_webhook_request(
+        State(captured): State<Arc<Mutex<Option<CapturedWebhookRequest>>>>,
+        headers: AxumHeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let request = CapturedWebhookRequest {
+            authorization: headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            apikey: headers
+                .get("apikey")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            x_channel: headers
+                .get("x-channel")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            content_type: headers
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            body,
+        };
+        *captured.lock().await = Some(request);
+        Json(json!({ "success": true }))
+    }
+
+    async fn spawn_capture_server(route_path: &str) -> Result<(String, Arc<Mutex<Option<CapturedWebhookRequest>>>)> {
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(route_path, post(capture_webhook_request))
+            .with_state(captured.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        Ok((format!("http://{}{}", addr, route_path), captured))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_send_to_webhook_sends_custom_headers() {
+        let (url, captured) = spawn_capture_server("/notify").await.expect("start capture server");
+
+        let mut config = NotificationConfig::default();
+        config.active_channel = "webhook".to_string();
+        config.webhook_url = Some(url);
+        config.webhook_custom_headers =
+            Some(r#"{"Authorization":"Bearer custom-token","X-Channel":"clawbot"}"#.to_string());
+
+        let client = NotificationClient::new(config);
+        client
+            .send_to_webhook(
+                client.config.webhook_url.as_deref().unwrap(),
+                "测试标题",
+                "测试正文",
+                "test_notification",
+            )
+            .await
+            .expect("send webhook");
+
+        let request = captured.lock().await.clone().expect("captured webhook request");
+
+        assert_eq!(request.authorization.as_deref(), Some("Bearer custom-token"));
+        assert_eq!(request.x_channel.as_deref(), Some("clawbot"));
+        assert_eq!(request.apikey, None);
+        assert_eq!(request.content_type.as_deref(), Some("application/json"));
+        assert_eq!(request.body.get("title").and_then(|v| v.as_str()), Some("测试标题"));
+        assert_eq!(request.body.get("content").and_then(|v| v.as_str()), Some("测试正文"));
+        assert_eq!(
+            request.body.get("event").and_then(|v| v.as_str()),
+            Some("test_notification")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_custom_headers_override_default_bearer_and_opensend_apikey() {
+        let (url, captured) = spawn_capture_server("/api/v1/message/opensend")
+            .await
+            .expect("start capture server");
+
+        let mut config = NotificationConfig::default();
+        config.active_channel = "webhook".to_string();
+        config.webhook_url = Some(url);
+        config.webhook_bearer_token = Some("default-token".to_string());
+        config.webhook_custom_headers =
+            Some(r#"{"Authorization":"Bearer override-token","apikey":"override-key"}"#.to_string());
+
+        let client = NotificationClient::new(config);
+        client
+            .send_to_webhook(
+                client.config.webhook_url.as_deref().unwrap(),
+                "openSend标题",
+                "openSend正文",
+                "test_notification",
+            )
+            .await
+            .expect("send opensend webhook");
+
+        let request = captured
+            .lock()
+            .await
+            .clone()
+            .expect("captured opensend webhook request");
+
+        assert_eq!(request.authorization.as_deref(), Some("Bearer override-token"));
+        assert_eq!(request.apikey.as_deref(), Some("override-key"));
+        assert_eq!(request.body.get("title").and_then(|v| v.as_str()), Some("openSend标题"));
+        assert_eq!(
+            request.body.get("content").and_then(|v| v.as_str()),
+            Some("openSend正文")
+        );
+        assert_eq!(request.body.get("proxy").and_then(|v| v.as_bool()), Some(false));
+        assert!(request.body.get("imageUrl").is_some());
     }
 }

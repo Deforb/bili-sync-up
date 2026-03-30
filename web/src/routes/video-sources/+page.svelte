@@ -45,6 +45,7 @@
 
 	let loading = false;
 	let bulkUpdating = false;
+	let watchLaterCleanupLoadingSourceId: number | null = null;
 	let sourcesEventSource: EventSource | null = null;
 	let currentSourcesStreamUrl: string | null = null;
 	const queuedDeleteNoticeMap = new Map<
@@ -570,6 +571,59 @@
 				}
 			}
 		);
+	}
+
+	async function handleCleanupDeletedFromSource(sourceId: number) {
+		if (watchLaterCleanupLoadingSourceId === sourceId) {
+			return;
+		}
+		watchLaterCleanupLoadingSourceId = sourceId;
+
+		try {
+			const scanResult = await runRequest(
+				() => api.updateVideoSourceScanDeletedOnce('watch_later', sourceId, true),
+				{ context: '触发清理失败' }
+			);
+			if (!scanResult) {
+				return;
+			}
+
+			if (!scanResult.data.success) {
+				toast.error('触发清理失败', { description: scanResult.data.message });
+				return;
+			}
+
+			updateSourceInStore('watch_later', sourceId, (source) => ({
+				...source,
+				scan_deleted_videos: scanResult.data.scan_deleted_videos,
+				scan_deleted_videos_once: scanResult.data.scan_deleted_videos_once
+			}));
+
+			const refreshResult = await runRequest(() => api.refreshScanning(), {
+				showErrorToast: false,
+				onError: () => {}
+			});
+
+			if (!refreshResult) {
+				toast.info('已启用本轮扫描清理', {
+					description: '立即扫描触发失败，系统会在下一轮扫描时清理源里已删除的视频'
+				});
+				return;
+			}
+
+			if (!refreshResult.data.success) {
+				toast.info('已启用本轮扫描清理', {
+					description: '立即扫描触发失败，系统会在下一轮扫描时清理源里已删除的视频'
+				});
+				return;
+			}
+
+			toast.success('已触发立即清理', {
+				description: '已开始扫描并清理源里已删除的视频，完成后会自动更新状态'
+			});
+		} finally {
+			watchLaterCleanupLoadingSourceId = null;
+		}
 	}
 
 	// 切换仅下载音频设置
@@ -1433,6 +1487,23 @@
 															: 'text-gray-400'}"
 													/>
 												</Button>
+
+												{#if sourceConfig.type === 'watch_later'}
+													<Button
+														size="sm"
+														variant="ghost"
+														onclick={() => handleCleanupDeletedFromSource(source.id)}
+														disabled={watchLaterCleanupLoadingSourceId === source.id}
+														title="删除在源里已删除的视频"
+														class="h-8 w-8 p-0"
+													>
+														<TrashIcon
+															class="h-4 w-4 {watchLaterCleanupLoadingSourceId === source.id
+																? 'text-blue-600'
+																: 'text-gray-500'}"
+														/>
+													</Button>
+												{/if}
 
 												<!-- 关键词过滤 -->
 												<Button

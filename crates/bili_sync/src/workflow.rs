@@ -858,6 +858,69 @@ pub async fn refresh_video_source<'a>(
     token: CancellationToken,
     bili_client: &BiliClient,
 ) -> Result<(usize, Vec<NewVideoInfo>)> {
+    async fn mark_videos_missing_from_source_as_deleted(
+        video_source: &VideoSourceEnum,
+        seen_bvids: &HashSet<String>,
+        connection: &DatabaseConnection,
+    ) -> Result<u64> {
+        if seen_bvids.is_empty() {
+            warn!(
+                "[{}] 本轮启用了已删除视频扫描，但拉取结果为空，跳过缺失视频删除以避免误判",
+                video_source.source_key()
+            );
+            return Ok(0);
+        }
+
+        let active_videos = video::Entity::find()
+            .filter(video_source.filter_expr())
+            .filter(video::Column::Deleted.eq(0))
+            .all(connection)
+            .await?;
+
+        let mut missing_video_ids = Vec::new();
+        let mut missing_bvid_samples = Vec::new();
+
+        for model in &active_videos {
+            if !seen_bvids.contains(&model.bvid) {
+                missing_video_ids.push(model.id);
+                if missing_bvid_samples.len() < 10 {
+                    missing_bvid_samples.push(model.bvid.clone());
+                }
+            }
+        }
+
+        if missing_video_ids.is_empty() {
+            info!(
+                "[{}] 已删除视频扫描完成：源内视频 {} 条，数据库活跃视频 {} 条，无需标记删除",
+                video_source.source_key(),
+                seen_bvids.len(),
+                active_videos.len()
+            );
+            return Ok(0);
+        }
+
+        let update_result = video::Entity::update_many()
+            .filter(video::Column::Id.is_in(missing_video_ids.clone()))
+            .col_expr(video::Column::Deleted, Expr::value(1))
+            .exec(connection)
+            .await?;
+
+        info!(
+            "[{}] 已删除视频扫描完成：源内视频 {} 条，数据库活跃视频 {} 条，标记删除 {} 条，样例BVID={:?}",
+            video_source.source_key(),
+            seen_bvids.len(),
+            active_videos.len(),
+            update_result.rows_affected,
+            missing_bvid_samples
+        );
+
+        if update_result.rows_affected > 0 {
+            notify_videos_changed();
+        }
+
+        Ok(update_result.rows_affected)
+    }
+
     video_source.log_refresh_video_start();
     let latest_row_at_string = video_source.get_latest_row_at();
     let latest_row_at = crate::utils::time_format::parse_time_string(&latest_row_at_string)
@@ -1008,6 +1071,7 @@ pub async fn refresh_video_source<'a>(
     let mut new_videos = Vec::new();
     let mut buffer: Vec<VideoInfo> = Vec::with_capacity(10);
     let mut skipped_first_old = false;
+    let mut seen_bvids = HashSet::new();
     let mut video_streams = video_streams;
 
     while let Some(res) = video_streams.next().await {
@@ -1028,6 +1092,17 @@ pub async fn refresh_video_source<'a>(
                 return Err(e);
             }
         };
+
+        let current_bvid = match &video_info {
+            VideoInfo::Detail { bvid, .. }
+            | VideoInfo::Favorite { bvid, .. }
+            | VideoInfo::Collection { bvid, .. }
+            | VideoInfo::WatchLater { bvid, .. }
+            | VideoInfo::Submission { bvid, .. }
+            | VideoInfo::Dynamic { bvid, .. }
+            | VideoInfo::Bangumi { bvid, .. } => bvid.clone(),
+        };
+        seen_bvids.insert(current_bvid);
 
         // 虽然 video_streams 是从新到旧的，但由于此处是分页请求，极端情况下可能发生访问完第一页时插入了两整页视频的情况
         // 此时获取到的第二页视频比第一页的还要新，因此为了确保正确，理应对每一页的第一个视频进行时间比较
@@ -1057,6 +1132,11 @@ pub async fn refresh_video_source<'a>(
         let videos_info = std::mem::take(&mut buffer);
         ingest_batch(video_source, connection, videos_info, &mut count, &mut new_videos).await?;
     }
+
+    if !(token.is_cancelled() || crate::task::TASK_CONTROLLER.is_paused()) && video_source.scan_deleted_videos() {
+        mark_videos_missing_from_source_as_deleted(video_source, &seen_bvids, connection).await?;
+    }
+
     if max_datetime != latest_row_at {
         // 转换为北京时间的标准字符串格式
         let beijing_datetime = max_datetime.with_timezone(&crate::utils::time_format::beijing_timezone());

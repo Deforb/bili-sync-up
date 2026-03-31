@@ -1079,17 +1079,29 @@
 
 					<!-- 分页控件 -->
 					{#if totalPages > 1}
-						<div class="flex items-center justify-between border-t px-4 py-3">
-							<div class="text-muted-foreground text-sm">
-								显示第 {(currentPage - 1) * perPage + 1} - {Math.min(
-									currentPage * perPage,
-									totalLogCount
-								)} 条，共 {totalLogCount} 条
+						<div
+							class="border-t px-4 py-3 {isMobile
+								? 'space-y-3'
+								: 'flex items-center justify-between gap-4'}"
+						>
+							<div
+								class="text-muted-foreground {isMobile
+									? 'flex flex-wrap items-center gap-x-2 gap-y-1 text-xs'
+									: 'text-sm'}"
+							>
+								<span class="whitespace-nowrap">
+									显示第 {(currentPage - 1) * perPage + 1} - {Math.min(
+										currentPage * perPage,
+										totalLogCount
+									)} 条
+								</span>
+								<span class="whitespace-nowrap">共 {totalLogCount} 条</span>
 							</div>
-							<div class="flex items-center space-x-2">
+							<div class="flex flex-wrap items-center gap-2 {isMobile ? 'justify-start' : ''}">
 								<Button
 									variant="outline"
 									size="sm"
+									class="shrink-0"
 									onclick={goToFirstPage}
 									disabled={currentPage === 1 || isLoading}
 								>
@@ -1098,6 +1110,7 @@
 								<Button
 									variant="outline"
 									size="sm"
+									class="shrink-0"
 									onclick={goToPrevPage}
 									disabled={currentPage === 1 || isLoading}
 								>
@@ -1112,6 +1125,7 @@
 									<Button
 										variant={pageNum === currentPage ? 'default' : 'outline'}
 										size="sm"
+										class="shrink-0"
 										onclick={() => goToPage(pageNum)}
 										disabled={isLoading}
 									>
@@ -1122,6 +1136,7 @@
 								<Button
 									variant="outline"
 									size="sm"
+									class="shrink-0"
 									onclick={goToNextPage}
 									disabled={currentPage === totalPages || isLoading}
 								>
@@ -1130,6 +1145,7 @@
 								<Button
 									variant="outline"
 									size="sm"
+									class="shrink-0"
 									onclick={goToLastPage}
 									disabled={currentPage === totalPages || isLoading}
 								>

@@ -5035,7 +5035,7 @@ async fn cleanup_root_metadata_if_no_media(root_dir: &std::path::Path, deleted_c
 }
 
 #[derive(Debug, Clone)]
-struct LocalSourceCleanupPlan {
+pub(crate) struct LocalSourceCleanupPlan {
     log_name: String,
     base_path: String,
     base_dir_label: &'static str,
@@ -5044,7 +5044,7 @@ struct LocalSourceCleanupPlan {
     pages_by_video_id: HashMap<i32, Vec<page::Model>>,
 }
 
-async fn build_local_source_cleanup_plan(
+pub(crate) async fn build_local_source_cleanup_plan(
     conn: &impl ConnectionTrait,
     log_name: String,
     base_path: String,
@@ -5313,7 +5313,7 @@ async fn delete_video_files_from_pages(conn: &impl ConnectionTrait, video_id: i3
     delete_video_files_from_video_and_pages(conn, &video, &pages).await
 }
 
-async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: LocalSourceCleanupPlan) {
+pub(crate) async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrait, plan: LocalSourceCleanupPlan) {
     let LocalSourceCleanupPlan {
         log_name,
         base_path,

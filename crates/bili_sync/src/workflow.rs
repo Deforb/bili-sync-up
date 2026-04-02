@@ -862,13 +862,15 @@ pub async fn refresh_video_source<'a>(
         video_source: &VideoSourceEnum,
         seen_bvids: &HashSet<String>,
         connection: &DatabaseConnection,
-    ) -> Result<u64> {
+    ) -> Result<Vec<video::Model>> {
+        use crate::api::handler::{build_local_source_cleanup_plan, execute_local_source_cleanup_plan};
+
         if seen_bvids.is_empty() {
             warn!(
                 "[{}] 本轮启用了已删除视频扫描，但拉取结果为空，跳过缺失视频删除以避免误判",
                 video_source.source_key()
             );
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let active_videos = video::Entity::find()
@@ -876,6 +878,8 @@ pub async fn refresh_video_source<'a>(
             .filter(video::Column::Deleted.eq(0))
             .all(connection)
             .await?;
+
+        let active_video_count = active_videos.len();
 
         let mut missing_video_ids = Vec::new();
         let mut missing_bvid_samples = Vec::new();
@@ -894,10 +898,15 @@ pub async fn refresh_video_source<'a>(
                 "[{}] 已删除视频扫描完成：源内视频 {} 条，数据库活跃视频 {} 条，无需标记删除",
                 video_source.source_key(),
                 seen_bvids.len(),
-                active_videos.len()
+                active_video_count
             );
-            return Ok(0);
+            return Ok(Vec::new());
         }
+
+        let missing_videos: Vec<video::Model> = active_videos
+            .into_iter()
+            .filter(|video| missing_video_ids.contains(&video.id))
+            .collect();
 
         let update_result = video::Entity::update_many()
             .filter(video::Column::Id.is_in(missing_video_ids.clone()))
@@ -909,7 +918,7 @@ pub async fn refresh_video_source<'a>(
             "[{}] 已删除视频扫描完成：源内视频 {} 条，数据库活跃视频 {} 条，标记删除 {} 条，样例BVID={:?}",
             video_source.source_key(),
             seen_bvids.len(),
-            active_videos.len(),
+            active_video_count,
             update_result.rows_affected,
             missing_bvid_samples
         );
@@ -918,7 +927,22 @@ pub async fn refresh_video_source<'a>(
             notify_videos_changed();
         }
 
-        Ok(update_result.rows_affected)
+        if !missing_videos.is_empty() {
+            let plan = build_local_source_cleanup_plan(
+                connection,
+                format!("{} 缺失视频", video_source.source_name_display()),
+                video_source.path().to_string_lossy().to_string(),
+                "视频源基础目录",
+                video_source.flat_folder(),
+                &missing_videos,
+            )
+            .await
+            .map_err(|e| anyhow!("{:?}", e))?;
+
+            execute_local_source_cleanup_plan(connection, plan).await;
+        }
+
+        Ok(missing_videos)
     }
 
     video_source.log_refresh_video_start();

@@ -22,6 +22,7 @@ pub struct VideoSourcesResponse {
 pub struct VideosResponse {
     pub videos: Vec<VideoInfo>,
     pub total_count: u64,
+    pub file_size_stats_pending: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -896,6 +897,7 @@ pub struct NotificationConfigResponse {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_custom_headers: Option<String>,
     pub webhook_format: String,
     pub webhook_custom_body: Option<String>,
     pub enable_scan_notifications: bool,

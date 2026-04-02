@@ -25,7 +25,7 @@
 </script>
 
 <div
-	class="bg-background hover:bg-muted/30 flex items-center justify-between rounded-md border p-3 transition-colors {isModified
+	class="status-task-card bg-background hover:bg-muted/30 flex flex-col gap-2 rounded-md border p-2.5 transition-colors sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:p-3 {isModified
 		? 'border-blue-200 ring-2 ring-blue-500/20'
 		: isDownloadTask
 			? 'border-orange-200 bg-orange-50/30'
@@ -34,7 +34,7 @@
 	<div class="flex items-center gap-3">
 		<div>
 			<div class="flex items-center gap-2">
-				<span class="text-sm font-medium {isDownloadTask ? 'text-orange-700' : ''}">{taskName}</span
+				<span class="status-task-title text-sm font-medium leading-5 {isDownloadTask ? 'text-orange-700' : ''}">{taskName}</span
 				>
 				{#if isDownloadTask}
 					<span class="rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700"
@@ -52,14 +52,14 @@
 			</div>
 		</div>
 	</div>
-	<div class="flex gap-1.5">
+	<div class="status-task-actions grid w-full grid-cols-2 gap-1.5 sm:flex sm:w-auto">
 		{#if isModified}
 			<Button
 				variant="ghost"
 				size="sm"
 				onclick={onReset}
 				{disabled}
-				class="h-7 min-w-[60px] cursor-pointer px-3 text-xs text-gray-600 hover:bg-gray-100"
+				class="col-span-2 h-7.5 w-full cursor-pointer px-3 text-xs text-gray-600 hover:bg-gray-100 sm:col-auto sm:h-8 sm:min-w-[60px] sm:w-auto"
 				title="恢复到原始状态"
 			>
 				重置
@@ -70,7 +70,7 @@
 			size="sm"
 			onclick={() => onStatusChange(0)}
 			{disabled}
-			class="h-7 min-w-[60px] cursor-pointer px-3 text-xs {currentStatus === 0
+			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:min-w-[60px] sm:w-auto {currentStatus === 0
 				? 'border-yellow-600 bg-yellow-600 font-medium text-white hover:bg-yellow-700'
 				: 'hover:border-yellow-400 hover:bg-yellow-50 hover:text-yellow-700'}"
 		>
@@ -81,7 +81,7 @@
 			size="sm"
 			onclick={() => onStatusChange(7)}
 			{disabled}
-			class="h-7 min-w-[60px] cursor-pointer px-3 text-xs {currentStatus === 7
+			class="h-7.5 w-full cursor-pointer px-3 text-xs sm:h-8 sm:min-w-[60px] sm:w-auto {currentStatus === 7
 				? 'border-green-600 bg-green-600 font-medium text-white hover:bg-green-700'
 				: 'hover:border-green-400 hover:bg-green-50 hover:text-green-700'}"
 		>
@@ -89,3 +89,21 @@
 		</Button>
 	</div>
 </div>
+
+<style>
+	@media (max-height: 700px) {
+		.status-task-card {
+			padding: 0.625rem 0.75rem;
+			gap: 0.5rem;
+		}
+
+		.status-task-title {
+			font-size: 0.9375rem;
+			line-height: 1.25rem;
+		}
+
+		.status-task-actions :global(button) {
+			height: 2rem;
+		}
+	}
+</style>

@@ -52,11 +52,27 @@ use crate::utils::live_updates::{
     notify_video_sources_changed, notify_videos_changed, subscribe_queue_status_changed,
     subscribe_video_sources_changed, subscribe_videos_changed,
 };
+use crate::utils::model::{is_video_file_size_backfill_pending, queue_video_file_size_backfill};
 use crate::utils::status::{PageStatus, VideoStatus};
 
 // 全局静态的扫码登录服务实例
 use once_cell::sync::Lazy;
 static QR_SERVICE: Lazy<crate::auth::QRLoginService> = Lazy::new(crate::auth::QRLoginService::new);
+
+type VideoListRow = (
+    i32,
+    String,
+    String,
+    String,
+    String,
+    i32,
+    u32,
+    String,
+    bool,
+    bool,
+    Option<String>,
+    Option<i32>,
+);
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -781,7 +797,7 @@ mod queue_sse_tests {
     use axum::Router;
     use bili_sync_migration::{Migrator, MigratorTrait};
     use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-    use sea_orm::{ActiveModelTrait, Set, SqlxSqliteConnector};
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseBackend, Set, SqlxSqliteConnector, Statement};
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
@@ -840,6 +856,12 @@ mod queue_sse_tests {
         let db = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool);
 
         Migrator::up(&db, None).await.expect("应能完成测试数据库迁移");
+        db.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "ALTER TABLE page ADD COLUMN ai_renamed INTEGER DEFAULT 0",
+        ))
+        .await
+        .ok();
         Arc::new(db)
     }
 
@@ -931,10 +953,51 @@ mod queue_sse_tests {
             cid: Set(None),
             is_charge_video: Set(false),
             charge_can_play: Set(false),
+            total_file_size_bytes: Set(None),
         }
         .insert(db)
         .await
         .expect("应能插入测试视频");
+    }
+
+    async fn insert_test_page_with_file(
+        db: &DatabaseConnection,
+        page_id: i32,
+        video_id: i32,
+        file_size_bytes: usize,
+    ) -> PathBuf {
+        let dir = unique_temp_dir("video-size-file");
+        fs::create_dir_all(&dir).expect("应能创建测试文件目录");
+        let file_path = dir.join(format!("page-{page_id}.mp4"));
+        fs::write(&file_path, vec![b'a'; file_size_bytes]).expect("应能写入测试文件");
+
+        page::ActiveModel {
+            id: Set(page_id),
+            video_id: Set(video_id),
+            cid: Set(900_000 + i64::from(page_id)),
+            pid: Set(1),
+            name: Set(format!("P{page_id}")),
+            width: Set(Some(1920)),
+            height: Set(Some(1080)),
+            duration: Set(60),
+            path: Set(Some(file_path.to_string_lossy().to_string())),
+            file_size_bytes: Set(None),
+            video_stream_size_bytes: Set(None),
+            audio_stream_size_bytes: Set(None),
+            image: Set(None),
+            download_status: Set(0),
+            created_at: Set("2026-03-28 00:00:00".to_string()),
+            play_video_streams: Set(None),
+            play_audio_streams: Set(None),
+            play_subtitle_streams: Set(None),
+            play_streams_updated_at: Set(None),
+            ai_renamed: sea_orm::ActiveValue::NotSet,
+        }
+        .insert(db)
+        .await
+        .expect("应能插入测试分页");
+
+        file_path
     }
 
     #[tokio::test]
@@ -1083,6 +1146,86 @@ mod queue_sse_tests {
         assert_eq!(videos[0]["name"], "测试视频");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_get_videos_file_size_sort_triggers_background_backfill() {
+        let db = create_test_db("videos-file-size-backfill").await;
+        insert_test_video(db.as_ref(), 1, "测试视频").await;
+        let file_path = insert_test_page_with_file(db.as_ref(), 1, 1, 4096).await;
+
+        let response = get_videos(
+            Extension(db.clone()),
+            Query(VideosRequest {
+                collection: None,
+                favorite: None,
+                submission: Some(1),
+                watch_later: None,
+                bangumi: None,
+                query: None,
+                page: Some(0),
+                page_size: Some(10),
+                show_failed_only: None,
+                min_height: None,
+                max_height: None,
+                resolution: None,
+                force: None,
+                sort_by: Some("file_size".to_string()),
+                sort_order: Some("desc".to_string()),
+            }),
+        )
+        .await
+        .expect("按文件大小排序应返回成功")
+        .into_data();
+
+        assert!(
+            response.file_size_stats_pending,
+            "存在未统计大小的视频时应返回统计中标记"
+        );
+
+        let expected_size = i64::try_from(fs::metadata(&file_path).unwrap().len()).unwrap();
+        for _ in 0..20 {
+            let video_model = video::Entity::find_by_id(1)
+                .one(db.as_ref())
+                .await
+                .expect("查询视频应成功")
+                .expect("视频应存在");
+            let page_model = page::Entity::find_by_id(1)
+                .one(db.as_ref())
+                .await
+                .expect("查询分页应成功")
+                .expect("分页应存在");
+
+            if video_model.total_file_size_bytes == Some(expected_size)
+                && page_model.file_size_bytes == Some(expected_size)
+            {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let video_model = video::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询视频应成功")
+            .expect("视频应存在");
+        let page_model = page::Entity::find_by_id(1)
+            .one(db.as_ref())
+            .await
+            .expect("查询分页应成功")
+            .expect("分页应存在");
+
+        assert_eq!(
+            video_model.total_file_size_bytes,
+            Some(expected_size),
+            "后台回填应最终写入视频总大小"
+        );
+        assert_eq!(
+            page_model.file_size_bytes,
+            Some(expected_size),
+            "后台回填应最终写入分页文件大小"
+        );
     }
 
     #[tokio::test]
@@ -1757,6 +1900,7 @@ pub async fn get_videos(
             return Ok(ApiResponse::ok(VideosResponse {
                 videos: Vec::new(),
                 total_count: 0,
+                file_size_stats_pending: false,
             }));
         }
 
@@ -1773,111 +1917,109 @@ pub async fn get_videos(
     // 处理排序参数
     let sort_by = params.sort_by.as_deref().unwrap_or("id");
     let sort_order = params.sort_order.as_deref().unwrap_or("desc");
-
-    // 应用排序
-    query = match sort_by {
-        "name" => {
-            if sort_order == "asc" {
-                query.order_by_asc(video::Column::Name)
-            } else {
-                query.order_by_desc(video::Column::Name)
-            }
-        }
-        "upper_name" => {
-            if sort_order == "asc" {
-                query.order_by_asc(video::Column::UpperName)
-            } else {
-                query.order_by_desc(video::Column::UpperName)
-            }
-        }
-        "created_at" => {
-            // 添加时间（入库时间）
-            if sort_order == "asc" {
-                query.order_by_asc(video::Column::CreatedAt)
-            } else {
-                query.order_by_desc(video::Column::CreatedAt)
-            }
-        }
-        "pubtime" => {
-            // 发布时间（视频在B站的发布时间）
-            if sort_order == "asc" {
-                query.order_by_asc(video::Column::Pubtime)
-            } else {
-                query.order_by_desc(video::Column::Pubtime)
-            }
-        }
-        "is_charge_video" => {
-            // 充电视频优先；同组内再按添加时间排序，保证列表稳定
-            if sort_order == "asc" {
-                query
-                    .order_by_asc(video::Column::IsChargeVideo)
-                    .order_by_desc(video::Column::Id)
-            } else {
-                query
-                    .order_by_desc(video::Column::IsChargeVideo)
-                    .order_by_desc(video::Column::Id)
-            }
-        }
-        _ => {
-            // 默认按ID排序
-            if sort_order == "asc" {
-                query.order_by_asc(video::Column::Id)
-            } else {
-                query.order_by_desc(video::Column::Id)
-            }
-        }
+    let missing_size_video_ids = if sort_by == "file_size" {
+        query
+            .clone()
+            .filter(video::Column::TotalFileSizeBytes.is_null())
+            .select_only()
+            .column(video::Column::Id)
+            .into_tuple::<(i32,)>()
+            .all(db.as_ref())
+            .await?
+            .into_iter()
+            .map(|(id,)| id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
     };
+    let file_size_stats_pending =
+        sort_by == "file_size" && (!missing_size_video_ids.is_empty() || is_video_file_size_backfill_pending());
+    if !missing_size_video_ids.is_empty() {
+        queue_video_file_size_backfill(&missing_size_video_ids, db.clone());
+    }
 
     Ok(ApiResponse::ok(VideosResponse {
+        file_size_stats_pending,
         videos: {
-            // 查询包含season_id和source_type字段，用于番剧标题获取
-            type RawVideoTuple = (
-                i32,
-                String,
-                String,
-                String,
-                String,
-                i32,
-                u32,
-                String,
-                bool,
-                bool,
-                Option<String>,
-                Option<i32>,
-            );
-            let raw_videos: Vec<RawVideoTuple> = query
-                .select_only()
-                .columns([
-                    video::Column::Id,
-                    video::Column::Bvid,
-                    video::Column::Name,
-                    video::Column::UpperName,
-                    video::Column::Path,
-                    video::Column::Category,
-                    video::Column::DownloadStatus,
-                    video::Column::Cover,
-                    video::Column::Valid,
-                    video::Column::IsChargeVideo,
-                    video::Column::SeasonId,
-                    video::Column::SourceType,
-                ])
-                .into_tuple::<(
-                    i32,
-                    String,
-                    String,
-                    String,
-                    String,
-                    i32,
-                    u32,
-                    String,
-                    bool,
-                    bool,
-                    Option<String>,
-                    Option<i32>,
-                )>()
-                .paginate(db.as_ref(), page_size)
-                .fetch_page(page)
-                .await?;
+            let raw_videos: Vec<VideoListRow> = {
+                let query = match sort_by {
+                    "name" => {
+                        if sort_order == "asc" {
+                            query.order_by_asc(video::Column::Name)
+                        } else {
+                            query.order_by_desc(video::Column::Name)
+                        }
+                    }
+                    "upper_name" => {
+                        if sort_order == "asc" {
+                            query.order_by_asc(video::Column::UpperName)
+                        } else {
+                            query.order_by_desc(video::Column::UpperName)
+                        }
+                    }
+                    "created_at" => {
+                        if sort_order == "asc" {
+                            query.order_by_asc(video::Column::CreatedAt)
+                        } else {
+                            query.order_by_desc(video::Column::CreatedAt)
+                        }
+                    }
+                    "pubtime" => {
+                        if sort_order == "asc" {
+                            query.order_by_asc(video::Column::Pubtime)
+                        } else {
+                            query.order_by_desc(video::Column::Pubtime)
+                        }
+                    }
+                    "is_charge_video" => {
+                        if sort_order == "asc" {
+                            query
+                                .order_by_asc(video::Column::IsChargeVideo)
+                                .order_by_desc(video::Column::Id)
+                        } else {
+                            query
+                                .order_by_desc(video::Column::IsChargeVideo)
+                                .order_by_desc(video::Column::Id)
+                        }
+                    }
+                    "file_size" => {
+                        let file_size_expr = Expr::cust("COALESCE(total_file_size_bytes, 0)");
+                        if sort_order == "asc" {
+                            query.order_by_asc(file_size_expr).order_by_asc(video::Column::Id)
+                        } else {
+                            query.order_by_desc(file_size_expr).order_by_desc(video::Column::Id)
+                        }
+                    }
+                    _ => {
+                        if sort_order == "asc" {
+                            query.order_by_asc(video::Column::Id)
+                        } else {
+                            query.order_by_desc(video::Column::Id)
+                        }
+                    }
+                };
+
+                query
+                    .select_only()
+                    .columns([
+                        video::Column::Id,
+                        video::Column::Bvid,
+                        video::Column::Name,
+                        video::Column::UpperName,
+                        video::Column::Path,
+                        video::Column::Category,
+                        video::Column::DownloadStatus,
+                        video::Column::Cover,
+                        video::Column::Valid,
+                        video::Column::IsChargeVideo,
+                        video::Column::SeasonId,
+                        video::Column::SourceType,
+                    ])
+                    .into_tuple::<VideoListRow>()
+                    .paginate(db.as_ref(), page_size)
+                    .fetch_page(page)
+                    .await?
+            };
 
             // 转换为VideoInfo并填充番剧标题
             let mut videos: Vec<VideoInfo> = raw_videos
@@ -7030,6 +7172,9 @@ async fn validate_path_reset_safety(
                 height: None,
                 duration: 0,
                 path: None,
+                file_size_bytes: None,
+                video_stream_size_bytes: None,
+                audio_stream_size_bytes: None,
                 image: None,
                 download_status: 0,
                 created_at: now_standard_string(),
@@ -7784,6 +7929,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
             wecom_mentioned_list: config.notification.wecom_mentioned_list.clone(),
             webhook_url: config.notification.webhook_url.clone(),
             webhook_bearer_token: config.notification.webhook_bearer_token.clone(),
+            webhook_custom_headers: config.notification.webhook_custom_headers.clone(),
             webhook_format: config.notification.webhook_format.clone(),
             webhook_custom_body: config.notification.webhook_custom_body.clone(),
             enable_scan_notifications: config.notification.enable_scan_notifications,
@@ -14473,6 +14619,9 @@ async fn update_bangumi_video_path_in_database(
             height: None,
             duration: 0,
             path: None,
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
             image: None,
             download_status: 0,
             created_at: now_standard_string(),
@@ -14611,6 +14760,9 @@ async fn move_bangumi_files_to_new_path(
             height: None,
             duration: 0,
             path: None,
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
             image: None,
             download_status: 0,
             created_at: now_standard_string(),
@@ -15332,6 +15484,16 @@ pub async fn test_notification_handler(
         let v = webhook_bearer_token.trim();
         config.webhook_bearer_token = if v.is_empty() { None } else { Some(v.to_string()) };
     }
+    if let Some(webhook_custom_headers) = request.webhook_custom_headers.as_ref() {
+        let v = webhook_custom_headers.trim();
+        if v.is_empty() {
+            config.webhook_custom_headers = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_custom_webhook_headers(v)
+                .map_err(ApiError::from)?;
+            config.webhook_custom_headers = Some(v.to_string());
+        }
+    }
     if let Some(webhook_format) = request
         .webhook_format
         .as_ref()
@@ -15468,6 +15630,7 @@ pub async fn get_notification_config() -> Result<ApiResponse<crate::api::respons
         wecom_mentioned_list: config.wecom_mentioned_list,
         webhook_url: config.webhook_url,
         webhook_bearer_token: config.webhook_bearer_token,
+        webhook_custom_headers: config.webhook_custom_headers,
         webhook_format: config.webhook_format,
         webhook_custom_body: config.webhook_custom_body,
         enable_scan_notifications: config.enable_scan_notifications,
@@ -15578,6 +15741,19 @@ pub async fn update_notification_config(
             notification_config.webhook_bearer_token = None;
         } else {
             notification_config.webhook_bearer_token = Some(bearer_token.trim().to_string());
+        }
+        updated = true;
+    }
+
+    if let Some(ref webhook_custom_headers) = request.webhook_custom_headers {
+        if webhook_custom_headers.trim().is_empty() {
+            notification_config.webhook_custom_headers = None;
+        } else {
+            crate::utils::notification::NotificationClient::validate_custom_webhook_headers(
+                webhook_custom_headers.trim(),
+            )
+            .map_err(ApiError::from)?;
+            notification_config.webhook_custom_headers = Some(webhook_custom_headers.trim().to_string());
         }
         updated = true;
     }

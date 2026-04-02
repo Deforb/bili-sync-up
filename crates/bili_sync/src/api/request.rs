@@ -17,7 +17,7 @@ pub struct VideosRequest {
     pub max_height: Option<u32>,
     pub resolution: Option<u32>,
     pub force: Option<bool>,
-    pub sort_by: Option<String>,    // "id", "name", "upper_name", "created_at", "updated_at"
+    pub sort_by: Option<String>,    // "id", "name", "pubtime", "is_charge_video", "file_size"
     pub sort_order: Option<String>, // "asc", "desc"
 }
 
@@ -346,6 +346,7 @@ pub struct UpdateNotificationConfigRequest {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_custom_headers: Option<String>,
     pub webhook_format: Option<String>,
     pub webhook_custom_body: Option<String>,
     pub enable_scan_notifications: Option<bool>,
@@ -369,6 +370,7 @@ pub struct TestNotificationRequest {
     pub wecom_mentioned_list: Option<Vec<String>>,
     pub webhook_url: Option<String>,
     pub webhook_bearer_token: Option<String>,
+    pub webhook_custom_headers: Option<String>,
     pub webhook_format: Option<String>,
     pub webhook_custom_body: Option<String>,
 }

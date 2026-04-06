@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bili_sync_entity::*;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
@@ -9,8 +9,8 @@ use sea_orm::{DatabaseBackend, QuerySelect, Set, Statement, Unchanged};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tokio::sync::Mutex as AsyncMutex;
+use std::time::{Duration, Instant};
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tracing::{debug, info, warn};
 
 use crate::adapter::{VideoSource, VideoSourceEnum};
@@ -1086,24 +1086,27 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         return Ok(());
     }
 
-    // SQLite 同一时刻只能有一个写者。分页状态更新最频繁，先在应用层串行化，
-    // 避免多个 update_pages_model 同时抢写锁把单条更新放大成秒级排队。
-    let _page_update_guard = PAGE_MODEL_UPDATE_LOCK.lock().await;
-    let affected_count = pages.len();
-    crate::database::run_traced_db_operation(
-        format!("utils.model.update_pages_model(count={affected_count})"),
-        async {
-            // 分页在详情阶段已创建，这里只做状态/路径/大小更新。
-            for page in pages {
-                page::Entity::update(page).exec(connection).await?;
-            }
-            Ok::<_, DbErr>(())
-        },
-    )
-    .await?;
+    let (done_tx, done_rx) = oneshot::channel();
+    {
+        let mut queue = PAGE_MODEL_UPDATE_QUEUE.lock().await;
+        queue.push(PendingPageUpdateRequest { pages, done_tx });
+    }
 
-    notify_videos_changed();
-    Ok(())
+    if PAGE_MODEL_UPDATE_WORKER_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            flush_batched_page_updates(connection).await;
+        });
+    }
+
+    match done_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(anyhow!(err)),
+        Err(_) => Err(anyhow!("分页状态批量写入 worker 异常退出")),
+    }
 }
 
 fn dedup_ids(ids: &[i32]) -> Vec<i32> {
@@ -1121,8 +1124,85 @@ const VIDEO_FILE_SIZE_BACKFILL_BATCH_SIZE: usize = 200;
 
 static VIDEO_FILE_SIZE_BACKFILL_QUEUE: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static VIDEO_FILE_SIZE_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
-static PAGE_MODEL_UPDATE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 static VIDEO_TOTAL_FILE_SIZE_RECOMPUTE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+static PAGE_MODEL_UPDATE_QUEUE: Lazy<AsyncMutex<Vec<PendingPageUpdateRequest>>> =
+    Lazy::new(|| AsyncMutex::new(Vec::new()));
+static PAGE_MODEL_UPDATE_WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+const PAGE_MODEL_UPDATE_BATCH_WINDOW: Duration = Duration::from_millis(20);
+
+struct PendingPageUpdateRequest {
+    pages: Vec<page::ActiveModel>,
+    done_tx: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+fn get_page_active_model_id(page: &page::ActiveModel) -> Option<i32> {
+    match &page.id {
+        sea_orm::ActiveValue::Set(id) | sea_orm::ActiveValue::Unchanged(id) => Some(*id),
+        sea_orm::ActiveValue::NotSet => None,
+    }
+}
+
+async fn flush_batched_page_updates(connection: DatabaseConnection) {
+    loop {
+        tokio::time::sleep(PAGE_MODEL_UPDATE_BATCH_WINDOW).await;
+
+        let requests = {
+            let mut queue = PAGE_MODEL_UPDATE_QUEUE.lock().await;
+            if queue.is_empty() {
+                PAGE_MODEL_UPDATE_WORKER_RUNNING.store(false, Ordering::Release);
+                return;
+            }
+            queue.drain(..).collect::<Vec<_>>()
+        };
+
+        let mut ordered_ids = Vec::new();
+        let mut deduped_pages = HashMap::new();
+        let mut passthrough_pages = Vec::new();
+        for request in &requests {
+            for page in &request.pages {
+                if let Some(page_id) = get_page_active_model_id(page) {
+                    if !deduped_pages.contains_key(&page_id) {
+                        ordered_ids.push(page_id);
+                    }
+                    deduped_pages.insert(page_id, page.clone());
+                } else {
+                    passthrough_pages.push(page.clone());
+                }
+            }
+        }
+
+        let mut merged_pages = ordered_ids
+            .into_iter()
+            .filter_map(|page_id| deduped_pages.remove(&page_id))
+            .collect::<Vec<_>>();
+        merged_pages.extend(passthrough_pages);
+
+        let affected_count = merged_pages.len();
+        let result = crate::database::run_traced_db_operation(
+            format!("utils.model.update_pages_model(count={affected_count})"),
+            async {
+                for page in merged_pages {
+                    page::Entity::update(page).exec(&connection).await?;
+                }
+                Ok::<_, DbErr>(())
+            },
+        )
+        .await;
+
+        if result.is_ok() {
+            notify_videos_changed();
+        }
+
+        let error_text = result.err().map(|err| format!("{:#}", err));
+        for request in requests {
+            let _ = request.done_tx.send(match &error_text {
+                Some(err) => Err(err.clone()),
+                None => Ok(()),
+            });
+        }
+    }
+}
 
 fn take_video_file_size_backfill_batch(limit: usize) -> Vec<i32> {
     let mut queue = VIDEO_FILE_SIZE_BACKFILL_QUEUE

@@ -1059,22 +1059,19 @@ pub async fn create_pages(
 
 /// 更新视频 model 的下载状态
 pub async fn update_videos_model(videos: Vec<video::ActiveModel>, connection: &DatabaseConnection) -> Result<()> {
+    if videos.is_empty() {
+        return Ok(());
+    }
+
     let affected_count = videos.len();
     crate::database::run_traced_db_operation(
         format!("utils.model.update_videos_model(count={affected_count})"),
         async {
-            video::Entity::insert_many(videos)
-                .on_conflict(
-                    OnConflict::column(video::Column::Id)
-                        .update_columns([
-                            video::Column::DownloadStatus,
-                            video::Column::Path,
-                            video::Column::TotalFileSizeBytes,
-                        ])
-                        .to_owned(),
-                )
-                .exec(connection)
-                .await
+            // 这些调用点都只更新已存在的视频记录，直接 UPDATE 比 UPSERT 更轻。
+            for video in videos {
+                video::Entity::update(video).exec(connection).await?;
+            }
+            Ok::<_, DbErr>(())
         },
     )
     .await?;
@@ -1093,18 +1090,11 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
     crate::database::run_traced_db_operation(
         format!("utils.model.update_pages_model(count={affected_count})"),
         async {
-            let query = page::Entity::insert_many(pages).on_conflict(
-                OnConflict::column(page::Column::Id)
-                    .update_columns([
-                        page::Column::DownloadStatus,
-                        page::Column::Path,
-                        page::Column::FileSizeBytes,
-                        page::Column::VideoStreamSizeBytes,
-                        page::Column::AudioStreamSizeBytes,
-                    ])
-                    .to_owned(),
-            );
-            query.exec(connection).await
+            // 分页在详情阶段已创建，这里只做状态/路径/大小更新。
+            for page in pages {
+                page::Entity::update(page).exec(connection).await?;
+            }
+            Ok::<_, DbErr>(())
         },
     )
     .await?;
@@ -1557,6 +1547,35 @@ mod tests {
             .expect("应能查询视频")
             .expect("视频应存在");
         assert_eq!(video.total_file_size_bytes, None);
+    }
+
+    #[tokio::test]
+    async fn update_videos_model_updates_existing_video_fields() {
+        let db = create_test_db("update-video-status").await;
+        insert_test_video(&db, 1, "测试视频").await;
+
+        let mut video_model: video::ActiveModel = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询视频")
+            .expect("视频应存在")
+            .into();
+        video_model.download_status = Set(7);
+        video_model.path = Set("/tmp/video-1-updated".to_string());
+        video_model.total_file_size_bytes = Set(Some(128));
+
+        update_videos_model(vec![video_model], &db)
+            .await
+            .expect("更新视频状态应成功");
+
+        let updated = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询更新后视频")
+            .expect("更新后视频应存在");
+        assert_eq!(updated.download_status, 7);
+        assert_eq!(updated.path, "/tmp/video-1-updated");
+        assert_eq!(updated.total_file_size_bytes, Some(128));
     }
 
     #[tokio::test]

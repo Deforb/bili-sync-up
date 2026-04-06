@@ -5445,6 +5445,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
     let (mut download_aborted, mut target_status) = (false, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
+    let mut changed_pages: Vec<page::ActiveModel> = Vec::new();
     let mut should_recompute_video_total_size = false;
     let mut stream = tasks;
     while let Some((res, page_pid, page_name)) = stream.next().await {
@@ -5464,7 +5465,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                     target_status = target_status.min(status);
                 }
                 if outcome.persistence.should_persist {
-                    update_pages_model(vec![model], args.connection).await?;
+                    changed_pages.push(model);
                 }
                 if outcome.persistence.should_recompute_video_total_size {
                     should_recompute_video_total_size = true;
@@ -5551,6 +5552,10 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                 }
             }
         }
+    }
+
+    if !changed_pages.is_empty() {
+        update_pages_model(changed_pages, args.connection).await?;
     }
 
     if should_recompute_video_total_size {

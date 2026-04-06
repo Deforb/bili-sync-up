@@ -7,6 +7,7 @@ use sea_orm::sea_query::{OnConflict, SimpleExpr};
 use sea_orm::DatabaseTransaction;
 use sea_orm::{DatabaseBackend, QuerySelect, Set, Statement, Unchanged};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1064,15 +1065,18 @@ pub async fn update_videos_model(videos: Vec<video::ActiveModel>, connection: &D
     }
 
     let affected_count = videos.len();
-    crate::database::run_traced_db_operation(
-        format!("utils.model.update_videos_model(count={affected_count})"),
-        async {
-            // 这些调用点都只更新已存在的视频记录，直接 UPDATE 比 UPSERT 更轻。
-            for video in videos {
-                video::Entity::update(video).exec(connection).await?;
-            }
-            Ok::<_, DbErr>(())
-        },
+    run_serialized_video_model_write(
+        "utils.model.update_videos_model",
+        crate::database::run_traced_db_operation(
+            format!("utils.model.update_videos_model(count={affected_count})"),
+            async {
+                // 这些调用点都只更新已存在的视频记录，直接 UPDATE 比 UPSERT 更轻。
+                for video in videos {
+                    video::Entity::update(video).exec(connection).await?;
+                }
+                Ok::<_, DbErr>(())
+            },
+        ),
     )
     .await?;
 
@@ -1086,19 +1090,19 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         return Ok(());
     }
 
-    // SQLite 同一时刻只能有一个写者。分页状态更新最频繁，先在应用层串行化，
-    // 避免多个 update_pages_model 同时抢写锁把单条更新放大成秒级排队。
-    let _page_update_guard = PAGE_MODEL_UPDATE_LOCK.lock().await;
     let affected_count = pages.len();
-    crate::database::run_traced_db_operation(
-        format!("utils.model.update_pages_model(count={affected_count})"),
-        async {
-            // 分页在详情阶段已创建，这里只做状态/路径/大小更新。
-            for page in pages {
-                page::Entity::update(page).exec(connection).await?;
-            }
-            Ok::<_, DbErr>(())
-        },
+    run_serialized_video_model_write(
+        "utils.model.update_pages_model",
+        crate::database::run_traced_db_operation(
+            format!("utils.model.update_pages_model(count={affected_count})"),
+            async {
+                // 分页在详情阶段已创建，这里只做状态/路径/大小更新。
+                for page in pages {
+                    page::Entity::update(page).exec(connection).await?;
+                }
+                Ok::<_, DbErr>(())
+            },
+        ),
     )
     .await?;
 
@@ -1121,8 +1125,32 @@ const VIDEO_FILE_SIZE_BACKFILL_BATCH_SIZE: usize = 200;
 
 static VIDEO_FILE_SIZE_BACKFILL_QUEUE: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static VIDEO_FILE_SIZE_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
-static PAGE_MODEL_UPDATE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+static VIDEO_MODEL_WRITE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 static VIDEO_TOTAL_FILE_SIZE_RECOMPUTE_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+
+pub async fn run_serialized_video_model_write<F, T>(operation_name: &str, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let wait_started_at = Instant::now();
+    let guard = VIDEO_MODEL_WRITE_LOCK.lock().await;
+    let wait_elapsed_ms = wait_started_at.elapsed().as_millis();
+    if wait_elapsed_ms >= 5_000 {
+        warn!(
+            "视频模型写入等待串行锁较久: op={}, elapsed={}ms",
+            operation_name, wait_elapsed_ms
+        );
+    } else if wait_elapsed_ms >= 100 {
+        debug!(
+            "视频模型写入等待串行锁: op={}, elapsed={}ms",
+            operation_name, wait_elapsed_ms
+        );
+    }
+
+    let result = future.await;
+    drop(guard);
+    result
+}
 
 fn take_video_file_size_backfill_batch(limit: usize) -> Vec<i32> {
     let mut queue = VIDEO_FILE_SIZE_BACKFILL_QUEUE
@@ -1265,16 +1293,19 @@ pub async fn recompute_video_total_file_sizes(video_ids: &[i32], connection: &Da
     );
     let values = video_ids.iter().copied().map(Into::into).collect::<Vec<_>>();
 
-    crate::database::run_traced_db_operation(
-        format!(
-            "utils.model.recompute_video_total_file_sizes(count={})",
-            video_ids.len()
+    run_serialized_video_model_write(
+        "utils.model.recompute_video_total_file_sizes",
+        crate::database::run_traced_db_operation(
+            format!(
+                "utils.model.recompute_video_total_file_sizes(count={})",
+                video_ids.len()
+            ),
+            async move {
+                connection
+                    .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
+                    .await
+            },
         ),
-        async move {
-            connection
-                .execute(Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values))
-                .await
-        },
     )
     .await?;
 
@@ -1595,6 +1626,54 @@ mod tests {
         assert_eq!(pages[0].file_size_bytes, Some(32));
         assert_eq!(pages[1].download_status, 8);
         assert_eq!(pages[1].file_size_bytes, Some(18));
+    }
+
+    #[tokio::test]
+    async fn update_pages_model_and_update_videos_model_handle_concurrent_writes() {
+        let db = create_test_db("update-page-video-concurrent").await;
+        insert_test_video(&db, 1, "测试视频").await;
+        insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
+
+        let mut page_model: page::ActiveModel = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询分页")
+            .expect("分页应存在")
+            .into();
+        page_model.download_status = Set(7);
+        page_model.file_size_bytes = Set(Some(24));
+
+        let mut video_model: video::ActiveModel = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询视频")
+            .expect("视频应存在")
+            .into();
+        video_model.download_status = Set(9);
+        video_model.total_file_size_bytes = Set(Some(24));
+
+        let (page_result, video_result) = tokio::join!(
+            update_pages_model(vec![page_model], &db),
+            update_videos_model(vec![video_model], &db),
+        );
+        page_result.expect("分页并发更新应成功");
+        video_result.expect("视频并发更新应成功");
+
+        let updated_page = page::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询更新后分页")
+            .expect("更新后分页应存在");
+        assert_eq!(updated_page.download_status, 7);
+        assert_eq!(updated_page.file_size_bytes, Some(24));
+
+        let updated_video = video::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("应能查询更新后视频")
+            .expect("更新后视频应存在");
+        assert_eq!(updated_video.download_status, 9);
+        assert_eq!(updated_video.total_file_size_bytes, Some(24));
     }
 
     #[tokio::test]

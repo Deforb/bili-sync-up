@@ -348,17 +348,20 @@ async fn persist_video_path_with_lock_retry(
 ) -> Result<()> {
     let mut attempt = 0usize;
     loop {
-        match crate::database::run_traced_db_operation(
-            format!("workflow.persist_video_path(video_id={video_id})"),
-            async {
-                video::Entity::update(video::ActiveModel {
-                    id: Set(video_id),
-                    path: Set(new_path.to_string()),
-                    ..Default::default()
-                })
-                .exec(connection)
-                .await
-            },
+        match crate::utils::model::run_serialized_video_model_write(
+            "workflow.persist_video_path",
+            crate::database::run_traced_db_operation(
+                format!("workflow.persist_video_path(video_id={video_id})"),
+                async {
+                    video::Entity::update(video::ActiveModel {
+                        id: Set(video_id),
+                        path: Set(new_path.to_string()),
+                        ..Default::default()
+                    })
+                    .exec(connection)
+                    .await
+                },
+            ),
         )
         .await {
             Ok(_) => return Ok(()),

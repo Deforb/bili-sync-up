@@ -1089,15 +1089,7 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         return Ok(());
     }
 
-    let affected_page_ids: Vec<i32> = pages
-        .iter()
-        .filter_map(|page| match &page.id {
-            sea_orm::ActiveValue::Set(id) | sea_orm::ActiveValue::Unchanged(id) => Some(*id),
-            sea_orm::ActiveValue::NotSet => None,
-        })
-        .collect();
-
-    let affected_count = affected_page_ids.len();
+    let affected_count = pages.len();
     crate::database::run_traced_db_operation(
         format!("utils.model.update_pages_model(count={affected_count})"),
         async {
@@ -1116,9 +1108,6 @@ pub async fn update_pages_model(pages: Vec<page::ActiveModel>, connection: &Data
         },
     )
     .await?;
-
-    let affected_video_ids = resolve_video_ids_by_page_ids(&affected_page_ids, connection).await?;
-    recompute_video_total_file_sizes(&affected_video_ids, connection).await?;
 
     notify_videos_changed();
     Ok(())
@@ -1234,25 +1223,6 @@ pub async fn queue_missing_video_file_size_backfill(connection: Arc<DatabaseConn
         .collect::<Vec<_>>();
 
     Ok(queue_video_file_size_backfill(&missing_video_ids, connection))
-}
-
-async fn resolve_video_ids_by_page_ids(page_ids: &[i32], connection: &DatabaseConnection) -> Result<Vec<i32>> {
-    let page_ids = dedup_ids(page_ids);
-    if page_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows: Vec<(i32,)> = page::Entity::find()
-        .select_only()
-        .column(page::Column::VideoId)
-        .filter(page::Column::Id.is_in(page_ids))
-        .into_tuple::<(i32,)>()
-        .all(connection)
-        .await?;
-
-    Ok(dedup_ids(
-        &rows.into_iter().map(|(video_id,)| video_id).collect::<Vec<_>>(),
-    ))
 }
 
 pub async fn recompute_video_total_file_sizes(video_ids: &[i32], connection: &DatabaseConnection) -> Result<()> {
@@ -1547,7 +1517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_pages_model_recomputes_video_total_file_size_bytes() {
+    async fn update_pages_model_updates_page_sizes_without_recomputing_video_total_file_size_bytes() {
         let db = create_test_db("update-page-sizes").await;
         insert_test_video(&db, 1, "测试视频").await;
         insert_test_page(&db, 1, 1, Some("/tmp/page-1.m4s".to_string())).await;
@@ -1586,7 +1556,7 @@ mod tests {
             .await
             .expect("应能查询视频")
             .expect("视频应存在");
-        assert_eq!(video.total_file_size_bytes, Some(50));
+        assert_eq!(video.total_file_size_bytes, None);
     }
 
     #[tokio::test]

@@ -276,7 +276,8 @@ use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
     create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
-    get_failed_videos_in_current_cycle, update_pages_model, update_videos_model,
+    get_failed_videos_in_current_cycle, recompute_video_total_file_sizes, update_pages_model,
+    update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
@@ -5408,6 +5409,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
     let (mut download_aborted, mut target_status) = (false, STATUS_OK);
     let mut cancelled_by_user = false;
     let mut failed_pages: Vec<String> = Vec::new(); // 收集失败的分页信息
+    let mut should_recompute_video_total_size = false;
     let mut stream = tasks;
     while let Some((res, page_pid, page_name)) = stream.next().await {
         match res {
@@ -5425,6 +5427,7 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                     target_status = target_status.min(status);
                 }
                 update_pages_model(vec![model], args.connection).await?;
+                should_recompute_video_total_size = true;
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -5507,6 +5510,10 @@ pub async fn dispatch_download_page(args: DownloadPageArgs<'_>, token: Cancellat
                 }
             }
         }
+    }
+
+    if should_recompute_video_total_size {
+        recompute_video_total_file_sizes(&[args.video_model.id], args.connection).await?;
     }
 
     if download_aborted {

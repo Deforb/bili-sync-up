@@ -115,7 +115,9 @@ fn log_active_db_operation_contention(message_prefix: &str, idle_message: &str, 
     let max_elapsed_ms = occupied.iter().map(|item| item.elapsed_ms).max().unwrap_or(0);
     let active = format_active_db_operation_snapshots(&occupied);
     match level {
-        ActiveDbOperationContentionLevel::Warn => warn!(
+        // 这类日志仅用于辅助观察“有人在排队”，不代表真实故障。
+        // 保持在 debug 级别，避免把少量可接受的等待刷成告警噪音。
+        ActiveDbOperationContentionLevel::Warn => debug!(
             "{} {} 个进行中的数据库操作，current={}, max_active_elapsed={}ms, active=[{}]",
             message_prefix,
             occupied.len(),

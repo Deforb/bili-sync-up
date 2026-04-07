@@ -276,8 +276,7 @@ use crate::unified_downloader::UnifiedDownloader;
 use crate::utils::format_arg::{collection_unified_page_format_args, page_format_args, video_format_args};
 use crate::utils::model::{
     create_pages, create_videos, filter_unfilled_videos, filter_unhandled_video_pages,
-    get_failed_videos_in_current_cycle, recompute_video_total_file_sizes, update_pages_model,
-    update_videos_model,
+    get_failed_videos_in_current_cycle, recompute_video_total_file_sizes, update_pages_model, update_videos_model,
 };
 use crate::utils::nfo::NFO;
 use crate::utils::notification::NewVideoInfo;
@@ -360,7 +359,8 @@ async fn persist_video_path_with_lock_retry(
                 .await
             },
         )
-        .await {
+        .await
+        {
             Ok(_) => return Ok(()),
             Err(err) => {
                 let anyhow_err = anyhow!(err.to_string());
@@ -393,6 +393,54 @@ async fn persist_video_path_with_lock_retry(
             }
         }
     }
+}
+
+async fn persist_video_path_if_materialized_with_lock_retry(
+    video_id: i32,
+    old_path: &str,
+    new_path: &str,
+    connection: &DatabaseConnection,
+    reason: &str,
+) -> Result<bool> {
+    if new_path.is_empty() || old_path == new_path {
+        return Ok(false);
+    }
+
+    let materialized = fs::metadata(Path::new(new_path))
+        .await
+        .map(|meta| meta.is_dir() || meta.is_file())
+        .unwrap_or(false);
+    if !materialized {
+        debug!(
+            "跳过按需持久化 video.path: video_id={}, reason={}, old='{}', new='{}'（目标路径尚未实体化）",
+            video_id, reason, old_path, new_path
+        );
+        return Ok(false);
+    }
+
+    persist_video_path_with_lock_retry(video_id, old_path, new_path, connection).await?;
+    debug!(
+        "已按需持久化 video.path: video_id={}, reason={}, old='{}', new='{}'",
+        video_id, reason, old_path, new_path
+    );
+    Ok(true)
+}
+
+fn should_keep_db_video_path_override(db_path: &str, expected_path: &str, original_db_path: &str) -> bool {
+    !db_path.is_empty() && db_path != expected_path && db_path != original_db_path
+}
+
+fn resolve_final_video_path(
+    path_to_save: &str,
+    ingest_old_video_path: &str,
+    latest_video_snapshot: Option<&video::Model>,
+) -> String {
+    latest_video_snapshot
+        .and_then(|latest_video| {
+            should_keep_db_video_path_override(&latest_video.path, path_to_save, ingest_old_video_path)
+                .then(|| latest_video.path.clone())
+        })
+        .unwrap_or_else(|| path_to_save.to_string())
 }
 
 fn normalize_upper_face_bucket(name: &str) -> String {
@@ -1436,11 +1484,9 @@ pub async fn fetch_video_details(
                 videos_without_season.len()
             );
             for video_model in videos_without_season {
-                let txn = crate::database::begin_traced_transaction(
-                    connection,
-                    "workflow.populate_bangumi_missing_season",
-                )
-                .await?;
+                let txn =
+                    crate::database::begin_traced_transaction(connection, "workflow.populate_bangumi_missing_season")
+                        .await?;
 
                 let (actual_cid, duration) = if let Some(ep_id) = &video_model.ep_id {
                     match get_bangumi_info_from_api(bili_client, ep_id, token.clone()).await {
@@ -1571,9 +1617,7 @@ pub async fn fetch_video_details(
                                 if should_restore_unreset {
                                     warn!(
                                         "视频「{}」({}) {}，已跳过重置并恢复为未重置状态",
-                                        &video_model.name,
-                                        &video_model.bvid,
-                                        inaccessible_reason
+                                        &video_model.name, &video_model.bvid, inaccessible_reason
                                     );
 
                                     let ok_video_status: u32 = VideoStatus::from([STATUS_OK; 5]).into();
@@ -1595,9 +1639,7 @@ pub async fn fetch_video_details(
                                 } else {
                                     warn!(
                                         "视频「{}」({}) {}，已标记为无效并跳过处理",
-                                        &video_model.name,
-                                        &video_model.bvid,
-                                        inaccessible_reason
+                                        &video_model.name, &video_model.bvid, inaccessible_reason
                                     );
                                 }
 
@@ -1700,7 +1742,9 @@ pub async fn fetch_video_details(
                                     if let Some(source_submission_id) = video_model.source_submission_id {
                                         debug!("submission来源视频，source_submission_id: {}", source_submission_id);
                                         if let Ok(Some(submission)) =
-                                            submission::Entity::find_by_id(source_submission_id).one(connection).await
+                                            submission::Entity::find_by_id(source_submission_id)
+                                                .one(connection)
+                                                .await
                                         {
                                             debug!(
                                                 "找到来源submission: {} ({})",
@@ -1866,7 +1910,8 @@ pub async fn fetch_video_details(
 
                             // 使用写事务函数（立即获取写锁，避免 SQLITE_BUSY_SNAPSHOT）
                             let txn =
-                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail").await?;
+                                crate::database::begin_write_transaction(connection, "workflow.process_video_detail")
+                                    .await?;
 
                             // 将分页信息写入数据库
                             create_pages(pages, &video_model_mut, &txn).await?;
@@ -3556,8 +3601,9 @@ pub async fn download_video_pages(
     let base_upper_path = &current_config.upper_path.join(&first_char).join(&upper_name);
     let is_single_page = final_video_model.single_page.context("single_page is null")?;
 
-    // 提前计算并持久化 video.path，避免下载中途失败后下轮将同一目录误判为“同名冲突”。
-    // 典型场景：上一轮在下载初期（如 412 风控）中止，目录已创建但路径尚未写回数据库。
+    // 预先计算本轮应使用的 video.path。
+    // 正常成功路径交给最终的 update_videos_model 一次性写回；
+    // 只有真实迁移成功或中途中止且目标路径已经实体化时，才按需补写数据库。
     let path_to_save = if is_bangumi {
         if let Some(ref bangumi_folder_path) = bangumi_folder_path {
             bangumi_folder_path.to_string_lossy().to_string()
@@ -3575,28 +3621,7 @@ pub async fn download_video_pages(
     } else {
         base_path.to_string_lossy().to_string()
     };
-
-    if !path_to_save.is_empty() && final_video_model.path != path_to_save {
-        if let Err(e) = persist_video_path_with_lock_retry(
-            final_video_model.id,
-            &final_video_model.path,
-            &path_to_save,
-            connection,
-        )
-        .await
-        {
-            warn!(
-                "提前持久化 video.path 失败（不中断下载流程）: video_id={}, old='{}', new='{}', err={}",
-                final_video_model.id, final_video_model.path, path_to_save, e
-            );
-        } else {
-            debug!(
-                "已提前持久化 video.path: video_id={}, old='{}', new='{}'",
-                final_video_model.id, final_video_model.path, path_to_save
-            );
-            notify_videos_changed();
-        }
-    }
+    let path_changed = !path_to_save.is_empty() && final_video_model.path != path_to_save;
 
     // 为多P视频生成基于视频名称的文件名
     let video_base_name = if !is_single_page {
@@ -5021,11 +5046,9 @@ pub async fn download_video_pages(
 
         // 立即修复数据库分页状态，避免前端仍显示“分页未完成”
         let ok_page_status: u32 = PageStatus::from([STATUS_OK; 5]).into();
-        let txn = crate::database::begin_traced_transaction(
-            connection,
-            "workflow.mark_charge_video_placeholder_complete",
-        )
-        .await?;
+        let txn =
+            crate::database::begin_traced_transaction(connection, "workflow.mark_charge_video_placeholder_complete")
+                .await?;
         video::Entity::update(video::ActiveModel {
             id: Unchanged(final_video_model.id),
             valid: Set(false),
@@ -5202,15 +5225,7 @@ pub async fn download_video_pages(
                 }
             }
         });
-    if let ExecutionStatus::Failed(e) = all_results
-        .into_iter()
-        .nth(4)
-        .context("page download result not found")?
-    {
-        if e.downcast_ref::<DownloadAbortError>().is_some() {
-            return Err(e);
-        }
-    }
+
     // 保存入库日志需要的值（因为 final_video_model 会被 .into() 消耗）
     let ingest_video_id = final_video_model.id;
     let ingest_video_name = final_video_model.name.clone();
@@ -5229,6 +5244,32 @@ pub async fn download_video_pages(
         }
         None
     });
+
+    if let ExecutionStatus::Failed(e) = all_results
+        .into_iter()
+        .nth(4)
+        .context("page download result not found")?
+    {
+        if e.downcast_ref::<DownloadAbortError>().is_some() {
+            if path_changed {
+                if let Err(persist_err) = persist_video_path_if_materialized_with_lock_retry(
+                    ingest_video_id,
+                    &ingest_old_video_path,
+                    &path_to_save,
+                    connection,
+                    "download_abort",
+                )
+                .await
+                {
+                    warn!(
+                        "下载中止后补写 video.path 失败（不中断异常传递）: video_id={}, old='{}', new='{}', err={}",
+                        ingest_video_id, ingest_old_video_path, path_to_save, persist_err
+                    );
+                }
+            }
+            return Err(e);
+        }
+    }
 
     let mut video_active_model: video::ActiveModel = final_video_model.into();
     video_active_model.download_status = Set(status.into());
@@ -5291,6 +5332,26 @@ pub async fn download_video_pages(
                                     }
                                 }
                             }
+
+                            if path_changed {
+                                match persist_video_path_if_materialized_with_lock_retry(
+                                    ingest_video_id,
+                                    &ingest_old_video_path,
+                                    &path_to_save,
+                                    connection,
+                                    "migrated_existing_folder",
+                                )
+                                .await
+                                {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!(
+                                            "视频文件夹迁移后补写 video.path 失败（不中断下载流程）: video_id={}, old='{}', new='{}', err={}",
+                                            ingest_video_id, ingest_old_video_path, path_to_save, e
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             warn!(
@@ -5336,20 +5397,13 @@ pub async fn download_video_pages(
         .await
         .ok()
         .flatten();
-    let final_path = match latest_video_snapshot.as_ref() {
-        Some(latest_video) => {
-            if !latest_video.path.is_empty() && latest_video.path != path_to_save {
-                debug!(
-                    "检测到 AI 重命名后的路径变化: video_id={}, 原路径='{}', 新路径='{}'",
-                    ingest_video_id, path_to_save, latest_video.path
-                );
-                latest_video.path.clone()
-            } else {
-                path_to_save
-            }
-        }
-        None => path_to_save,
-    };
+    let final_path = resolve_final_video_path(&path_to_save, &ingest_old_video_path, latest_video_snapshot.as_ref());
+    if final_path != path_to_save {
+        debug!(
+            "检测到数据库中的路径覆盖本轮计算结果: video_id={}, 计算路径='{}', 数据库路径='{}'",
+            ingest_video_id, path_to_save, final_path
+        );
+    }
 
     video_active_model.path = Set(final_path);
     video_active_model.total_file_size_bytes = Set(latest_video_snapshot
@@ -10519,11 +10573,9 @@ async fn backfill_submission_collection_membership(
     }
 
     let mut updated_rows = 0u64;
-    let txn = crate::database::begin_traced_transaction(
-        connection,
-        "workflow.sync_submission_membership_episode_numbers",
-    )
-    .await?;
+    let txn =
+        crate::database::begin_traced_transaction(connection, "workflow.sync_submission_membership_episode_numbers")
+            .await?;
 
     for (bvid, (collection_key, episode_number)) in membership {
         let result = txn
@@ -12031,7 +12083,10 @@ mod tests {
     #[test]
     fn test_is_bili_request_failed_inaccessible_matches_404_and_62002() {
         let deleted_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "not found".to_string()));
-        let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(62002, "稿件不可见".to_string()));
+        let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
+            62002,
+            "稿件不可见".to_string()
+        ));
         let other_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-352, "风控".to_string()));
 
         assert!(is_bili_request_failed_inaccessible(&deleted_err));
@@ -12046,6 +12101,74 @@ mod tests {
 
         assert!(is_database_locked_error(&locked_err));
         assert!(!is_database_locked_error(&other_err));
+    }
+
+    #[test]
+    fn test_should_keep_db_video_path_override_ignores_stale_original_path() {
+        assert!(!should_keep_db_video_path_override(
+            "/videos/old-path",
+            "/videos/new-path",
+            "/videos/old-path"
+        ));
+    }
+
+    #[test]
+    fn test_should_keep_db_video_path_override_accepts_external_new_path() {
+        assert!(should_keep_db_video_path_override(
+            "/videos/ai-renamed",
+            "/videos/new-path",
+            "/videos/old-path"
+        ));
+    }
+
+    #[test]
+    fn test_resolve_final_video_path_prefers_computed_path_when_db_still_old() {
+        let latest_video = video::Model {
+            id: 1,
+            collection_id: None,
+            favorite_id: None,
+            watch_later_id: None,
+            submission_id: Some(1),
+            source_id: None,
+            source_type: Some(4),
+            upper_id: 1,
+            upper_name: "测试UP".to_string(),
+            upper_face: String::new(),
+            staff_info: None,
+            source_submission_id: None,
+            name: "测试视频".to_string(),
+            path: "/videos/old-path".to_string(),
+            category: 1,
+            bvid: "BV1xx411c7mD".to_string(),
+            intro: String::new(),
+            cover: String::new(),
+            ctime: chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc(),
+            pubtime: chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc(),
+            favtime: chrono::DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc(),
+            download_status: 0,
+            valid: true,
+            tags: None,
+            single_page: Some(true),
+            created_at: "2026-04-07 00:00:00".to_string(),
+            season_id: None,
+            submission_membership_state: 0,
+            submission_membership_checked_at: None,
+            ep_id: None,
+            season_number: None,
+            episode_number: None,
+            deleted: 0,
+            share_copy: None,
+            show_season_type: None,
+            actors: None,
+            auto_download: true,
+            cid: None,
+            is_charge_video: false,
+            charge_can_play: false,
+            total_file_size_bytes: None,
+        };
+
+        let resolved = resolve_final_video_path("/videos/new-path", "/videos/old-path", Some(&latest_video));
+        assert_eq!(resolved, "/videos/new-path");
     }
 
     fn sample_page_model_for_persistence_decision() -> page::Model {

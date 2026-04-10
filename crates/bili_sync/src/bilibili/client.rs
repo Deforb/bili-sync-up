@@ -227,6 +227,14 @@ impl BiliClient {
             .request_with_gaia_vtoken(method, url, credential.as_deref(), gaia_vtoken.as_deref())
     }
 
+    /// 获取一个不附带登录凭证的公开请求
+    pub async fn public_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
+        if let Some(limiter) = &self.limiter {
+            limiter.acquire_one().await;
+        }
+        self.client.request(method, url, None)
+    }
+
     /// 发送 GET 请求
     pub async fn get(&self, url: &str, token: CancellationToken) -> Result<reqwest::Response> {
         if let Some(limiter) = &self.limiter {
@@ -239,6 +247,27 @@ impl BiliClient {
         let config = crate::config::reload_config();
         let credential = config.credential.load();
         let request_builder = self.client.request(Method::GET, url, credential.as_deref());
+
+        let response = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(anyhow!("Request cancelled before send")),
+            res = request_builder.send() => res,
+        };
+
+        Ok(response?)
+    }
+
+    /// 发送不附带登录凭证的公开 GET 请求
+    pub async fn public_get(&self, url: &str, token: CancellationToken) -> Result<reqwest::Response> {
+        if let Some(limiter) = &self.limiter {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(anyhow!("Request cancelled in limiter")),
+                _ = limiter.acquire_one() => {},
+            }
+        }
+
+        let request_builder = self.client.request(Method::GET, url, None);
 
         let response = tokio::select! {
             biased;
@@ -952,7 +981,7 @@ impl BiliClient {
 
         let url = "https://api.bilibili.com/x/web-interface/card";
         let response = self
-            .request(Method::GET, url)
+            .public_request(Method::GET, url)
             .await
             .query(&[("mid", up_id.to_string())])
             .send()

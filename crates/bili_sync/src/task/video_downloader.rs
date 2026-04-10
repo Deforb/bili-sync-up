@@ -23,6 +23,13 @@ use crate::utils::time_format::{now_naive, now_standard_string, parse_time_strin
 use crate::workflow::process_video_source;
 use bili_sync_entity::entities;
 
+fn is_submission_lookup_retryable_error(err: &anyhow::Error) -> bool {
+    matches!(
+        crate::error::ErrorClassifier::classify_error(err).error_type,
+        crate::error::ErrorType::Timeout | crate::error::ErrorType::Network
+    )
+}
+
 fn submission_scan_strategy_enabled(config: &Config) -> bool {
     config.submission_scan_strategy.batch_size > 0 || config.submission_scan_strategy.adaptive_enabled
 }
@@ -189,6 +196,14 @@ async fn try_disable_cancelled_submission_source(
                 }
             }
             Err(fetch_err) => {
+                if is_submission_lookup_retryable_error(&fetch_err) {
+                    warn!(
+                        "回查UP主投稿源账号状态超时/网络失败，跳过自动停用判定 (submission_id: {}, upper_id: {}): {}",
+                        source.id, upper_id, fetch_err
+                    );
+                    return Ok(None);
+                }
+
                 debug!(
                     "回查UP主投稿源账号状态失败，回退到基础信息判断 (submission_id: {}, upper_id: {}): {}",
                     source.id, upper_id, fetch_err
@@ -201,10 +216,17 @@ async fn try_disable_cancelled_submission_source(
                         }
                     }
                     Err(fallback_err) => {
-                        debug!(
-                            "回退获取UP主投稿源基础信息失败，暂不自动停用该源 (submission_id: {}, upper_id: {}): {}",
-                            source.id, upper_id, fallback_err
-                        );
+                        if is_submission_lookup_retryable_error(&fallback_err) {
+                            warn!(
+                                "回退获取UP主投稿源基础信息超时/网络失败，暂不自动停用该源 (submission_id: {}, upper_id: {}): {}",
+                                source.id, upper_id, fallback_err
+                            );
+                        } else {
+                            debug!(
+                                "回退获取UP主投稿源基础信息失败，暂不自动停用该源 (submission_id: {}, upper_id: {}): {}",
+                                source.id, upper_id, fallback_err
+                            );
+                        }
                     }
                 }
             }
@@ -1067,7 +1089,20 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
                             break; // 跳出循环，停止处理剩余的视频源
                         }
 
-                        error!("处理过程遇到错误：{:#}", e);
+                        if source.source_type == SourceType::Submission
+                            && matches!(
+                                classified_error.error_type,
+                                crate::error::ErrorType::Timeout | crate::error::ErrorType::Network
+                            )
+                        {
+                            warn!(
+                                "投稿源处理遇到可重试的网络问题 (ID: {}): {}",
+                                source.id, classified_error.message
+                            );
+                            debug!("投稿源原始错误详情 (ID: {}): {:#}", source.id, e);
+                        } else {
+                            error!("处理过程遇到错误：{:#}", e);
+                        }
                     }
                 }
             }
@@ -1173,6 +1208,11 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             debug!("任务已暂停，跳过后处理阶段");
         }
 
+        if TASK_CONTROLLER.take_just_resumed() {
+            info!("检测到任务刷新信号，跳过等待并立即开始新一轮扫描");
+            continue;
+        }
+
         // ========== 等待阶段 ==========
         // 安全时机：扫描任务已完成，可以安全地检测配置更新并决定是否立即开始下一轮
         // 智能等待：支持配置更新的间隔等待
@@ -1200,8 +1240,12 @@ pub async fn video_downloader(connection: Arc<DatabaseConnection>) {
             }
 
             let sleep_duration = remaining_time.min(check_frequency);
-            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_duration)).await;
-            remaining_time = remaining_time.saturating_sub(sleep_duration);
+            let woke_by_signal = TASK_CONTROLLER
+                .wait_for_scan_signal_or_timeout(tokio::time::Duration::from_secs(sleep_duration))
+                .await;
+            if !woke_by_signal {
+                remaining_time = remaining_time.saturating_sub(sleep_duration);
+            }
 
             // 检查是否刚刚恢复，如果是则立即开始新扫描
             if TASK_CONTROLLER.take_just_resumed() {

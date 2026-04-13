@@ -34,6 +34,8 @@ pub struct Danmu {
     /// 否在在调节分辨率的时候字体会发生变化。
     pub fontsize: u32,
     pub rgb: (u8, u8, u8),
+    pub sent_at: Option<i64>,
+    pub source_id: Option<String>,
 }
 
 impl Danmu {

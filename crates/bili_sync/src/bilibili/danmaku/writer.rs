@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use tokio::fs::{self, File};
+use tokio::fs::{self, File, OpenOptions};
 
 use crate::bilibili::danmaku::canvas::{CanvasConfig, DanmakuOption};
 use crate::bilibili::danmaku::{AssWriter, Danmu};
@@ -21,16 +21,29 @@ impl<'a> DanmakuWriter<'a> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        // 使用 with_config 来访问配置
-        let canvas_config = crate::config::with_config(|bundle| {
-            // 需要克隆 DanmakuOption 以避免生命周期问题
-            let danmaku_option = bundle.config.danmaku_option.clone();
-            // 使用 Box::leak 创建 'static 生命周期的引用
-            let static_option: &'static DanmakuOption = Box::leak(Box::new(danmaku_option));
-            CanvasConfig::new(static_option, self.page)
-        });
-        let mut writer =
-            AssWriter::construct(File::create(path).await?, self.page.name.clone(), canvas_config.clone()).await?;
+        let file = File::create(path).await?;
+        self.write_inner(file, true).await
+    }
+
+    pub async fn append(self, path: PathBuf) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let mut write_header = true;
+        if let Ok(metadata) = fs::metadata(&path).await {
+            write_header = metadata.len() == 0;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path).await?;
+        self.write_inner(file, write_header).await
+    }
+
+    async fn write_inner(self, file: File, write_header: bool) -> Result<()> {
+        let canvas_config = canvas_config(self.page);
+        let mut writer = if write_header {
+            AssWriter::construct(file, self.page.name.clone(), canvas_config.clone()).await?
+        } else {
+            AssWriter::new(file, self.page.name.clone(), canvas_config.clone())
+        };
         let mut canvas = canvas_config.canvas();
         for danmuku in self.danmaku {
             if let Some(drawable) = canvas.draw(danmuku)? {
@@ -40,4 +53,12 @@ impl<'a> DanmakuWriter<'a> {
         writer.flush().await?;
         Ok(())
     }
+}
+
+fn canvas_config(page: &PageInfo) -> CanvasConfig {
+    crate::config::with_config(|bundle| {
+        let danmaku_option = bundle.config.danmaku_option.clone();
+        let static_option: &'static DanmakuOption = Box::leak(Box::new(danmaku_option));
+        CanvasConfig::new(static_option, page)
+    })
 }

@@ -3,6 +3,7 @@ pub mod bangumi_cache;
 pub mod bangumi_name_extractor;
 pub mod collection_aggregate;
 pub mod convert;
+pub mod danmaku_schedule;
 pub mod deepseek_pow;
 pub mod deepseek_web;
 pub mod file_logger;

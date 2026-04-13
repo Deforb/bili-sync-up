@@ -8,6 +8,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 use crate::bilibili::danmaku::canvas::CanvasConfig;
 use crate::bilibili::danmaku::{DanmakuOption, DrawEffect, Drawable};
 
+const EVENT_NAME_PREFIX: &str = "bsync-dm";
+
 struct TimePoint {
     t: f64,
 }
@@ -155,7 +157,7 @@ impl<W: AsyncWrite> AssWriter<W> {
             .write_all(
                 format!(
                     // Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-                    "Dialogue: 2,{start},{end},{style},,0,0,0,,{{{effect}\\c&H{b:02x}{g:02x}{r:02x}&}}{text}\n",
+                    "Dialogue: 2,{start},{end},{style},{name},0,0,0,,{{{effect}\\c&H{b:02x}{g:02x}{r:02x}&}}{text}\n",
                     start = TimePoint {
                         t: drawable.danmu.timeline_s
                     },
@@ -163,6 +165,7 @@ impl<W: AsyncWrite> AssWriter<W> {
                         t: drawable.danmu.timeline_s + drawable.duration
                     },
                     style = drawable.style_name,
+                    name = build_event_name(&drawable.danmu),
                     effect = AssEffect {
                         effect: drawable.effect
                     },
@@ -182,6 +185,26 @@ impl<W: AsyncWrite> AssWriter<W> {
     pub async fn flush(&mut self) -> Result<()> {
         Ok(self.f.flush().await?)
     }
+}
+
+fn build_event_name(danmu: &crate::bilibili::danmaku::Danmu) -> String {
+    match (danmu.source_id.as_deref(), danmu.sent_at) {
+        (Some(source_id), Some(sent_at)) if !source_id.is_empty() => {
+            format!("{EVENT_NAME_PREFIX}|{source_id}|{sent_at}")
+        }
+        _ => String::new(),
+    }
+}
+
+pub fn parse_event_name(value: &str) -> Option<(&str, i64)> {
+    let mut parts = value.trim().split('|');
+    let prefix = parts.next()?;
+    let source_id = parts.next()?;
+    let sent_at = parts.next()?.parse().ok()?;
+    if prefix != EVENT_NAME_PREFIX || source_id.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((source_id, sent_at))
 }
 
 fn escape_text(text: &str) -> Cow<'_, str> {
@@ -231,5 +254,15 @@ mod tests {
             escape_text("呵\n呵\n比\n你\n们\n更\n喜\n欢\n晚\n晚").as_ref(),
             r"呵\N呵\N比\N你\N们\N更\N喜\N欢\N晚\N晚"
         );
+    }
+
+    #[test]
+    fn event_name_roundtrip() {
+        let name = build_event_name(&crate::bilibili::danmaku::Danmu {
+            source_id: Some("123456".to_string()),
+            sent_at: Some(1710000000),
+            ..Default::default()
+        });
+        assert_eq!(parse_event_name(&name), Some(("123456", 1710000000)));
     }
 }

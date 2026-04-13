@@ -281,6 +281,62 @@ impl Default for SubmissionScanStrategyConfig {
     }
 }
 
+/// 弹幕增量更新策略。
+///
+/// 采用三段式调度：
+/// - 新鲜期：发布时间后的 `fresh_days` 天内，每 `fresh_interval_hours` 小时刷新一次
+/// - 成熟期：之后到 `mature_days` 天内，每 `mature_interval_days` 天刷新一次
+/// - 老化期：之后到 `cold_days` 天内，每 `cold_interval_days` 天刷新一次
+/// - 冷冻期：超过 `cold_days` 后自动冻结，不再后台轮询
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct DanmakuUpdatePolicy {
+    pub enabled: bool,
+    pub fresh_days: u32,
+    pub fresh_interval_hours: u32,
+    pub mature_days: u32,
+    pub mature_interval_days: u32,
+    pub cold_days: u32,
+    pub cold_interval_days: u32,
+}
+
+impl Default for DanmakuUpdatePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fresh_days: 3,
+            fresh_interval_hours: 6,
+            mature_days: 30,
+            mature_interval_days: 3,
+            cold_days: 180,
+            cold_interval_days: 30,
+        }
+    }
+}
+
+impl DanmakuUpdatePolicy {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.fresh_days > self.mature_days {
+            return Err("fresh_days 不能大于 mature_days");
+        }
+        if self.mature_days > self.cold_days {
+            return Err("mature_days 不能大于 cold_days");
+        }
+        if self.fresh_interval_hours == 0 {
+            return Err("fresh_interval_hours 必须大于 0");
+        }
+        if self.mature_interval_days == 0 {
+            return Err("mature_interval_days 必须大于 0");
+        }
+        if self.cold_interval_days == 0 {
+            return Err("cold_interval_days 必须大于 0");
+        }
+        Ok(())
+    }
+}
+
 fn default_large_submission_threshold() -> usize {
     80
 }

@@ -62,7 +62,9 @@ use crate::api::handler::{
     poll_qr_status,
     proxy_image,
     proxy_video_stream,
+    refresh_page_danmaku,
     refresh_scanning_endpoint,
+    refresh_video_danmaku,
     reload_config,
     reload_config_new_internal,
     reset_all_videos,
@@ -199,8 +201,10 @@ pub async fn http_server(_database_connection: Arc<DatabaseConnection>) -> Resul
         .route("/api/videos/live", get(stream_videos))
         .route("/api/videos/{id}", get(get_video))
         .route("/api/videos/{id}", delete(delete_video))
+        .route("/api/videos/{id}/refresh-danmaku", post(refresh_video_danmaku))
         .route("/api/videos/{id}/reset", post(reset_video))
         .route("/api/videos/{id}/update-status", post(update_video_status))
+        .route("/api/pages/{id}/refresh-danmaku", post(refresh_page_danmaku))
         .route("/api/videos/reset-all", post(reset_all_videos))
         .route("/api/videos/reset-specific-tasks", post(reset_specific_tasks))
         .route("/api/dashboard", get(get_dashboard_data))

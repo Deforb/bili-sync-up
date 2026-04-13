@@ -53,6 +53,13 @@ pub struct UpdateVideoStatusResponse {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct RefreshDanmakuResponse {
+    pub success: bool,
+    pub refreshed_pages: usize,
+    pub message: String,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct ResetAllVideosResponse {
     pub resetted: bool,
     pub resetted_videos_count: usize,
@@ -251,28 +258,70 @@ pub struct PageInfo {
     pub name: String,
     pub download_status: [u32; 5],
     pub path: Option<String>,
+    pub danmaku_last_synced_at: Option<String>,
+    pub danmaku_sync_generation: u32,
+    pub danmaku_cid_snapshot: Option<i64>,
+    pub danmaku_last_write_count: u32,
 }
 
 impl From<(i32, i32, String, u32)> for PageInfo {
     fn from((id, pid, name, download_status): (i32, i32, String, u32)) -> Self {
-        Self {
-            id,
-            pid,
-            name,
-            download_status: PageStatus::from(download_status).into(),
-            path: None,
-        }
+        Self::from((id, pid, name, download_status, None, None, 0, None, 0))
     }
 }
 
 impl From<(i32, i32, String, u32, Option<String>)> for PageInfo {
     fn from((id, pid, name, download_status, path): (i32, i32, String, u32, Option<String>)) -> Self {
+        Self::from((id, pid, name, download_status, path, None, 0, None, 0))
+    }
+}
+
+impl
+    From<(
+        i32,
+        i32,
+        String,
+        u32,
+        Option<String>,
+        Option<String>,
+        u32,
+        Option<i64>,
+        u32,
+    )> for PageInfo
+{
+    fn from(
+        (
+            id,
+            pid,
+            name,
+            download_status,
+            path,
+            danmaku_last_synced_at,
+            danmaku_sync_generation,
+            danmaku_cid_snapshot,
+            danmaku_last_write_count,
+        ): (
+            i32,
+            i32,
+            String,
+            u32,
+            Option<String>,
+            Option<String>,
+            u32,
+            Option<i64>,
+            u32,
+        ),
+    ) -> Self {
         Self {
             id,
             pid,
             name,
             download_status: PageStatus::from(download_status).into(),
             path,
+            danmaku_last_synced_at,
+            danmaku_sync_generation,
+            danmaku_cid_snapshot,
+            danmaku_last_write_count,
         }
     }
 }
@@ -422,6 +471,13 @@ pub struct ConfigResponse {
     pub danmaku_bold: bool,
     pub danmaku_outline: f64,
     pub danmaku_time_offset: f64,
+    pub danmaku_update_enabled: bool,
+    pub danmaku_update_fresh_days: u32,
+    pub danmaku_update_fresh_interval_hours: u32,
+    pub danmaku_update_mature_days: u32,
+    pub danmaku_update_mature_interval_days: u32,
+    pub danmaku_update_cold_days: u32,
+    pub danmaku_update_cold_interval_days: u32,
     // 并发控制设置
     pub concurrent_video: usize,
     pub concurrent_page: usize,

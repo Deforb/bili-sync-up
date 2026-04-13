@@ -165,6 +165,13 @@
 	let danmakuBold = true;
 	let danmakuOutline = 0.8;
 	let danmakuTimeOffset = 0.0;
+	let danmakuUpdateEnabled = false;
+	let danmakuUpdateFreshDays = 3;
+	let danmakuUpdateFreshIntervalHours = 6;
+	let danmakuUpdateMatureDays = 30;
+	let danmakuUpdateMatureIntervalDays = 3;
+	let danmakuUpdateColdDays = 180;
+	let danmakuUpdateColdIntervalDays = 30;
 
 	// 并发控制设置
 	let concurrentVideo = 3;
@@ -289,6 +296,17 @@
 
 	// 显示帮助信息的状态（在文件命名抽屉中使用）
 	let showHelp = false;
+
+	const danmakuUpdateHelp = {
+		section:
+			'已下载分页会按视频发布时间分阶段刷新弹幕。新鲜期刷新更频繁，成熟期和老化期逐步放缓，超过老化期后会进入冷冻阶段并停止后台轮询。',
+		freshDays: '视频发布后，落在这个天数范围内的分页会被视为新鲜期。',
+		freshIntervalHours: '新鲜期内后台检查弹幕更新的间隔，单位是小时。',
+		matureDays: '超过新鲜期、但还没达到这个天数的分页会进入成熟期。',
+		matureIntervalDays: '成熟期内后台检查弹幕更新的间隔，单位是天。',
+		coldDays: '超过成熟期、但还没达到这个天数的分页会进入老化期；再往后会停止后台轮询。',
+		coldIntervalDays: '老化期内后台检查弹幕更新的间隔，单位是天。'
+	};
 
 	// 验证相关状态
 	let pageNameError = '';
@@ -508,6 +526,13 @@
 		danmakuBold = config.danmaku_bold !== undefined ? config.danmaku_bold : true;
 		danmakuOutline = config.danmaku_outline || 0.8;
 		danmakuTimeOffset = config.danmaku_time_offset || 0.0;
+		danmakuUpdateEnabled = config.danmaku_update_enabled ?? false;
+		danmakuUpdateFreshDays = config.danmaku_update_fresh_days ?? 3;
+		danmakuUpdateFreshIntervalHours = config.danmaku_update_fresh_interval_hours ?? 6;
+		danmakuUpdateMatureDays = config.danmaku_update_mature_days ?? 30;
+		danmakuUpdateMatureIntervalDays = config.danmaku_update_mature_interval_days ?? 3;
+		danmakuUpdateColdDays = config.danmaku_update_cold_days ?? 180;
+		danmakuUpdateColdIntervalDays = config.danmaku_update_cold_interval_days ?? 30;
 
 		// 并发控制设置
 		concurrentVideo = config.concurrent_video || 3;
@@ -822,6 +847,13 @@
 			danmaku_bold: danmakuBold,
 			danmaku_outline: danmakuOutline,
 			danmaku_time_offset: danmakuTimeOffset,
+			danmaku_update_enabled: danmakuUpdateEnabled,
+			danmaku_update_fresh_days: danmakuUpdateFreshDays,
+			danmaku_update_fresh_interval_hours: danmakuUpdateFreshIntervalHours,
+			danmaku_update_mature_days: danmakuUpdateMatureDays,
+			danmaku_update_mature_interval_days: danmakuUpdateMatureIntervalDays,
+			danmaku_update_cold_days: danmakuUpdateColdDays,
+			danmaku_update_cold_interval_days: danmakuUpdateColdIntervalDays,
 			// 并发控制设置
 			concurrent_video: concurrentVideo,
 			concurrent_page: concurrentPage,
@@ -2138,6 +2170,127 @@
 						class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
 					/>
 					<Label for="danmaku-bold" class="text-sm">加粗字体</Label>
+				</div>
+			</div>
+
+			<div class="rounded-lg border p-4">
+				<div class="mb-4 flex items-center justify-between gap-3">
+					<div>
+						<h5 class="cursor-help font-medium" title={danmakuUpdateHelp.section}>弹幕增量更新</h5>
+						<p class="text-muted-foreground mt-1 text-sm">
+							按视频发布时间分阶段刷新已下载分页的弹幕，并在冷冻期后停止后台轮询。
+						</p>
+					</div>
+					<label class="flex items-center gap-2 text-sm">
+						<input
+							type="checkbox"
+							bind:checked={danmakuUpdateEnabled}
+							class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+						/>
+						<span>启用</span>
+					</label>
+				</div>
+
+				<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+					<div class="space-y-2">
+						<Label for="danmaku-update-fresh-days" class="cursor-help" title={danmakuUpdateHelp.freshDays}
+							>新鲜期天数</Label
+						>
+						<Input
+							id="danmaku-update-fresh-days"
+							type="number"
+							bind:value={danmakuUpdateFreshDays}
+							min="0"
+							placeholder="3"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-fresh-hours"
+							class="cursor-help"
+							title={danmakuUpdateHelp.freshIntervalHours}
+						>
+							新鲜期刷新间隔（小时）
+						</Label>
+						<Input
+							id="danmaku-update-fresh-hours"
+							type="number"
+							bind:value={danmakuUpdateFreshIntervalHours}
+							min="1"
+							placeholder="6"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-mature-days"
+							class="cursor-help"
+							title={danmakuUpdateHelp.matureDays}
+						>
+							成熟期截至天数
+						</Label>
+						<Input
+							id="danmaku-update-mature-days"
+							type="number"
+							bind:value={danmakuUpdateMatureDays}
+							min="0"
+							placeholder="30"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-mature-interval"
+							class="cursor-help"
+							title={danmakuUpdateHelp.matureIntervalDays}
+						>
+							成熟期刷新间隔（天）
+						</Label>
+						<Input
+							id="danmaku-update-mature-interval"
+							type="number"
+							bind:value={danmakuUpdateMatureIntervalDays}
+							min="1"
+							placeholder="3"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label for="danmaku-update-cold-days" class="cursor-help" title={danmakuUpdateHelp.coldDays}
+							>老化期截至天数</Label
+						>
+						<Input
+							id="danmaku-update-cold-days"
+							type="number"
+							bind:value={danmakuUpdateColdDays}
+							min="0"
+							placeholder="180"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-cold-interval"
+							class="cursor-help"
+							title={danmakuUpdateHelp.coldIntervalDays}
+						>
+							老化期刷新间隔（天）
+						</Label>
+						<Input
+							id="danmaku-update-cold-interval"
+							type="number"
+							bind:value={danmakuUpdateColdIntervalDays}
+							min="1"
+							placeholder="30"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
 				</div>
 			</div>
 

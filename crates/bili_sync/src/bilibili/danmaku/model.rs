@@ -79,6 +79,12 @@ impl From<DanmakuElem> for Danmu {
                 ((elem.color >> 8) & 0xFF) as u8,
                 (elem.color & 0xFF) as u8,
             ),
+            sent_at: Some(elem.ctime),
+            source_id: if elem.dmid_str.is_empty() {
+                Some(elem.id.to_string())
+            } else {
+                Some(elem.dmid_str)
+            },
         }
     }
 }

@@ -18,6 +18,7 @@ mod task;
 mod unified_downloader;
 mod utils;
 mod workflow;
+mod workflow_danmaku;
 
 use std::fmt::Debug;
 use std::future::Future;

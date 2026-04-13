@@ -222,6 +222,13 @@ pub struct UpdateConfigRequest {
     pub danmaku_bold: Option<bool>,
     pub danmaku_outline: Option<f64>,
     pub danmaku_time_offset: Option<f64>,
+    pub danmaku_update_enabled: Option<bool>,
+    pub danmaku_update_fresh_days: Option<u32>,
+    pub danmaku_update_fresh_interval_hours: Option<u32>,
+    pub danmaku_update_mature_days: Option<u32>,
+    pub danmaku_update_mature_interval_days: Option<u32>,
+    pub danmaku_update_cold_days: Option<u32>,
+    pub danmaku_update_cold_interval_days: Option<u32>,
     // 并发控制设置
     pub concurrent_video: Option<usize>,
     pub concurrent_page: Option<usize>,

@@ -3188,6 +3188,10 @@ pub async fn download_video_pages(
                 play_audio_streams: None,
                 play_subtitle_streams: None,
                 play_streams_updated_at: None,
+                danmaku_last_synced_at: None,
+                danmaku_sync_generation: 0,
+                danmaku_cid_snapshot: None,
+                danmaku_last_write_count: 0,
                 ai_renamed: None,
             };
 
@@ -12245,6 +12249,10 @@ mod tests {
             play_audio_streams: None,
             play_subtitle_streams: None,
             play_streams_updated_at: None,
+            danmaku_last_synced_at: None,
+            danmaku_sync_generation: 0,
+            danmaku_cid_snapshot: None,
+            danmaku_last_write_count: 0,
             ai_renamed: Some(0),
         }
     }

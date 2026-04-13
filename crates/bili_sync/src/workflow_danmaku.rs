@@ -548,8 +548,11 @@ async fn refresh_one_page(
     active.update(connection).await.context("更新 page 弹幕同步状态失败")?;
 
     info!(
-        "视频「{}」({}) 分页 pid={} 弹幕已刷新 -> stage={:?}",
-        video_model.name, video_model.bvid, fresh.page, resolved_stage
+        "视频「{}」({}) 分页 pid={} 弹幕已刷新 -> 阶段={}",
+        video_model.name,
+        video_model.bvid,
+        fresh.page,
+        resolved_stage.label()
     );
 
     Ok(())

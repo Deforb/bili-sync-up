@@ -28,6 +28,16 @@ impl Stage {
     pub fn as_generation(self) -> u32 {
         self as u32
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::Initial => "未同步",
+            Stage::Fresh => "新鲜期",
+            Stage::Mature => "成熟期",
+            Stage::Cold => "老化期",
+            Stage::Frozen => "已冻结",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,5 +179,14 @@ mod tests {
             ),
             Decision::Skip
         );
+    }
+
+    #[test]
+    fn stage_label_returns_chinese_text() {
+        assert_eq!(Stage::Initial.label(), "未同步");
+        assert_eq!(Stage::Fresh.label(), "新鲜期");
+        assert_eq!(Stage::Mature.label(), "成熟期");
+        assert_eq!(Stage::Cold.label(), "老化期");
+        assert_eq!(Stage::Frozen.label(), "已冻结");
     }
 }

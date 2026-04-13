@@ -75,14 +75,14 @@ async fn load_fresh_pages_or_fallback(
     match bili_video.get_view_info().await {
         Ok(VideoInfo::Detail { pages, .. }) => Ok(pages),
         Ok(_) => {
-            warn!(
+            info!(
                 "视频「{}」({}) 的 view_info 返回了非 Detail 类型，改用数据库已存分页信息继续刷新弹幕",
                 video_model.name, video_model.bvid
             );
             db_pages.iter().map(build_stored_page_info).collect()
         }
         Err(err) if should_fallback_to_stored_pages(&err) => {
-            warn!(
+            info!(
                 "视频「{}」({}) 获取 view_info 失败，改用数据库已存分页信息继续刷新弹幕：{:#}",
                 video_model.name, video_model.bvid, err
             );

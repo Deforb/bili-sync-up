@@ -4,6 +4,7 @@
 	import api from '$lib/api';
 	import StatusEditor from '$lib/components/status-editor.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import { DANMAKU_SYNC_STAGE_LABELS } from '$lib/consts';
 	import VideoCard from '$lib/components/video-card.svelte';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import {
@@ -21,6 +22,7 @@
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
 	import EditIcon from '@lucide/svelte/icons/edit';
 	import PlayIcon from '@lucide/svelte/icons/play';
+	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
 	import TrashIcon from '@lucide/svelte/icons/trash-2';
 	import XIcon from '@lucide/svelte/icons/x';
 	import { onMount } from 'svelte';
@@ -39,6 +41,8 @@
 	let onlinePlayMode = false; // false: 本地播放, true: B站内嵌播放
 	let deleteDialogOpen = false;
 	let deleting = false;
+	let refreshingVideoDanmaku = false;
+	let refreshingPageIds = new Set<number>();
 	let safePlayingPageIndex = 0;
 	let videoDetailLoadToken = 0;
 	let lastPlaybackNoticeKey: string | null = null;
@@ -85,6 +89,123 @@
 		}
 		if (!options?.keepPlayMode) {
 			onlinePlayMode = false;
+		}
+	}
+
+	function parseBeijingTimestamp(value?: string | null): Date | null {
+		if (!value) return null;
+		const match = value.match(
+			/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/
+		);
+		if (!match) return null;
+		const [, year, month, day, hour, minute, second] = match;
+		return new Date(
+			Date.UTC(
+				Number(year),
+				Number(month) - 1,
+				Number(day),
+				Number(hour) - 8,
+				Number(minute),
+				Number(second)
+			)
+		);
+	}
+
+	function getDanmakuStageLabel(generation: number) {
+		return DANMAKU_SYNC_STAGE_LABELS[generation] ?? '未知阶段';
+	}
+
+	function getDanmakuStageDescription(generation: number) {
+		switch (generation) {
+			case 1:
+				return '新鲜期会更频繁地检查弹幕更新，并按日期增量追加到文件。';
+			case 2:
+				return '成熟期会降低后台检查频率，继续按日期增量追加新弹幕。';
+			case 3:
+				return '老化期仍会定期检查弹幕更新，但频率会进一步放缓。';
+			case 4:
+				return '已冻结阶段不会再自动后台轮询，但仍然可以手动刷新弹幕。';
+			default:
+				return '当前分页还没有建立弹幕同步记录。';
+		}
+	}
+
+	function getDanmakuSyncTitle(generation: number, lastSyncedAt?: string | null) {
+		const stageLabel = getDanmakuStageLabel(generation);
+		const description = getDanmakuStageDescription(generation);
+		return lastSyncedAt ? `当前阶段：${stageLabel}。${description}` : `当前阶段：${stageLabel}。${description}`;
+	}
+
+	function getDanmakuLastSyncedTitle(value?: string | null) {
+		return value ? '显示最近一次成功刷新弹幕的北京时间。' : '当前还没有记录过弹幕刷新时间。';
+	}
+
+	function getRefreshVideoDanmakuTitle() {
+		return '手动刷新当前视频全部分页的弹幕。已存在的弹幕文件会按日期增量追加。';
+	}
+
+	function getRefreshPageDanmakuTitle(path?: string | null) {
+		return path
+			? '手动刷新当前分页的弹幕。已存在的弹幕文件会按日期增量追加。'
+			: '当前分页还没有本地文件路径，暂时无法刷新弹幕。';
+	}
+
+	function getRelativeDanmakuTime(value?: string | null) {
+		const date = parseBeijingTimestamp(value);
+		if (!date) return '未同步';
+		const diffSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+		if (diffSeconds < 60) return '刚刚';
+		if (diffSeconds < 3600) return `${Math.floor(diffSeconds / 60)} 分钟前`;
+		if (diffSeconds < 86400) return `${Math.floor(diffSeconds / 3600)} 小时前`;
+		if (diffSeconds < 86400 * 7) return `${Math.floor(diffSeconds / 86400)} 天前`;
+		return value ?? '未同步';
+	}
+
+	function formatDanmakuWriteCount(count?: number | null) {
+		return `${Math.max(0, count ?? 0)} 条`;
+	}
+
+	function isRefreshingPage(pageId: number) {
+		return refreshingPageIds.has(pageId);
+	}
+
+	async function handleRefreshVideoDanmaku() {
+		if (!videoData) return;
+
+		refreshingVideoDanmaku = true;
+		try {
+			const result = await api.refreshVideoDanmaku(videoData.video.id);
+			toast.success('弹幕刷新完成', {
+				description: result.data.message
+			});
+			await loadVideoDetail();
+		} catch (error) {
+			console.error('刷新整条视频弹幕失败:', error);
+			toast.error('刷新弹幕失败', {
+				description: (error as ApiError).message
+			});
+		} finally {
+			refreshingVideoDanmaku = false;
+		}
+	}
+
+	async function handleRefreshPageDanmaku(pageId: number) {
+		refreshingPageIds = new Set(refreshingPageIds).add(pageId);
+		try {
+			const result = await api.refreshPageDanmaku(pageId);
+			toast.success('分页弹幕刷新完成', {
+				description: result.data.message
+			});
+			await loadVideoDetail();
+		} catch (error) {
+			console.error('刷新分页弹幕失败:', error);
+			toast.error('刷新分页弹幕失败', {
+				description: (error as ApiError).message
+			});
+		} finally {
+			const next = new Set(refreshingPageIds);
+			next.delete(pageId);
+			refreshingPageIds = next;
 		}
 	}
 
@@ -249,7 +370,6 @@
 				await findAndLoadPageForVideo(videoId);
 				if (loadToken !== videoDetailLoadToken) return;
 			}
-
 		} catch (error) {
 			if (loadToken !== videoDetailLoadToken) return;
 			console.error('加载视频详情失败:', error);
@@ -568,6 +688,7 @@
 					class="{isMobile ? 'w-full' : 'shrink-0'} cursor-pointer"
 					onclick={() => (statusEditorOpen = true)}
 					disabled={statusEditorLoading}
+					title="编辑视频和分页的下载状态"
 				>
 					<EditIcon class="mr-2 h-4 w-4" />
 					编辑状态
@@ -578,6 +699,7 @@
 					class="{isMobile ? 'w-full' : 'shrink-0'} cursor-pointer"
 					onclick={() => (deleteDialogOpen = true)}
 					disabled={deleting}
+					title="删除当前视频记录和关联状态"
 				>
 					<TrashIcon class="mr-2 h-4 w-4" />
 					删除视频
@@ -628,8 +750,23 @@
 		{#if videoData.pages && videoData.pages.length > 0}
 			<div class="mb-4 flex {isMobile ? 'flex-col gap-2' : 'items-center justify-between'}">
 				<h2 class="{isMobile ? 'text-lg' : 'text-xl'} font-semibold">分页列表</h2>
-				<div class="text-muted-foreground text-sm">
-					共 {videoData.pages.length} 个分页
+				<div class="flex {isMobile ? 'flex-col gap-2' : 'items-center gap-2'}">
+					<div class="text-muted-foreground text-sm">
+						共 {videoData.pages.length} 个分页
+					</div>
+					<Button
+						size="sm"
+						variant="outline"
+						class={isMobile ? 'w-full' : ''}
+						title={getRefreshVideoDanmakuTitle()}
+						onclick={handleRefreshVideoDanmaku}
+						disabled={refreshingVideoDanmaku}
+					>
+						<RefreshCwIcon
+							class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}"
+						/>
+						{refreshingVideoDanmaku ? '刷新中...' : '刷新全部弹幕'}
+					</Button>
 				</div>
 			</div>
 
@@ -663,24 +800,81 @@
 									customTitle="P{pageInfo.pid}: {pageInfo.name}"
 									customSubtitle=""
 									taskNames={['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕']}
-									showProgress={false}
+									showProgress={true}
 								/>
+
+								<div class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+									<div class="min-w-0">
+										<div
+											class="text-muted-foreground cursor-help text-xs"
+											title={getDanmakuSyncTitle(
+												pageInfo.danmaku_sync_generation,
+												pageInfo.danmaku_last_synced_at
+											)}
+										>
+											弹幕同步
+										</div>
+										<div
+											class="truncate cursor-help text-sm font-medium"
+											title={getDanmakuSyncTitle(
+												pageInfo.danmaku_sync_generation,
+												pageInfo.danmaku_last_synced_at
+											)}
+										>
+											{getDanmakuStageLabel(pageInfo.danmaku_sync_generation)}
+											{#if pageInfo.danmaku_last_synced_at}
+												· {getRelativeDanmakuTime(pageInfo.danmaku_last_synced_at)}
+											{:else}
+												· 未同步
+											{/if}
+										</div>
+										{#if pageInfo.danmaku_last_synced_at}
+											<div
+												class="text-muted-foreground cursor-help text-[11px]"
+												title={getDanmakuLastSyncedTitle(pageInfo.danmaku_last_synced_at)}
+											>
+												上次刷新：{pageInfo.danmaku_last_synced_at}
+											</div>
+											<div class="text-muted-foreground flex items-center gap-1 text-[11px]">
+												<span
+													class="cursor-help"
+													title="显示最近一次写入到弹幕文件的条数。首次刷新通常是全量写入，之后会按日期增量追加。"
+												>
+													上次写入：{formatDanmakuWriteCount(pageInfo.danmaku_last_write_count)}
+												</span>
+											</div>
+										{/if}
+									</div>
+									<Button
+										size="sm"
+										variant="outline"
+										class="shrink-0"
+										title={getRefreshPageDanmakuTitle(pageInfo.path)}
+										onclick={() => handleRefreshPageDanmaku(pageInfo.id)}
+										disabled={isRefreshingPage(pageInfo.id) || !pageInfo.path}
+									>
+										<RefreshCwIcon
+											class="mr-2 h-4 w-4 {isRefreshingPage(pageInfo.id) ? 'animate-spin' : ''}"
+										/>
+										{isRefreshingPage(pageInfo.id) ? '刷新中...' : '刷新弹幕'}
+									</Button>
+								</div>
 
 								<!-- 播放按钮区域 -->
 								<div class="flex justify-center gap-2">
 									{#if pageInfo.download_status[1] === 7}
-									<Button
-										size="sm"
-										variant="default"
-										class="flex-1"
-										title="本地播放"
-										onclick={() => {
-											currentPlayingPageIndex = index;
-											onlinePlayMode = false;
-											chargeLockedDisplayMode = null;
-											showVideoPlayer = true;
-										}}
-									>
+										<Button
+											size="sm"
+											variant="default"
+											class="flex-1"
+											title="本地播放"
+											onclick={() => {
+												currentPlayingPageIndex = index;
+												onlinePlayMode = false;
+												chargeLockedDisplayMode = null;
+												showVideoPlayer = true;
+											}}
+										>
 											<PlayIcon class="mr-2 h-4 w-4" />
 											本地播放
 										</Button>
@@ -700,31 +894,6 @@
 										<PlayIcon class="mr-2 h-4 w-4" />
 										B站内嵌
 									</Button>
-								</div>
-
-								<!-- 下载进度条 -->
-								<div class="space-y-2 px-1">
-									<div class="text-muted-foreground flex justify-between text-xs">
-										<span class="truncate">下载进度</span>
-										<span class="shrink-0"
-											>{pageInfo.download_status.filter((s) => s === 7).length}/{pageInfo
-												.download_status.length}</span
-										>
-									</div>
-									<div class="flex w-full gap-1">
-										{#each pageInfo.download_status as status, taskIndex (taskIndex)}
-											<div
-												class="h-2 w-full cursor-help rounded-sm transition-all {status === 7
-													? 'bg-green-500'
-													: status === 0
-														? 'bg-yellow-500'
-														: 'bg-red-500'}"
-												title="{['视频封面', '视频内容', '视频信息', '视频弹幕', '视频字幕'][
-													taskIndex
-												]}: {status === 7 ? '已完成' : status === 0 ? '未开始' : `失败${status}次`}"
-											></div>
-										{/each}
-									</div>
 								</div>
 							</div>
 						{/each}
@@ -767,7 +936,8 @@
 							{/if}
 							{#if onlinePlayMode}
 								<div class="mb-3 text-sm text-gray-500">
-									当前为 B 站内嵌播放，清晰度和码率由 B 站播放器控制，不继承 bili-sync 的清晰度设置。
+									当前为 B 站内嵌播放，清晰度和码率由 B 站播放器控制，不继承 bili-sync
+									的清晰度设置。
 								</div>
 							{/if}
 
@@ -802,11 +972,11 @@
 												class="h-auto w-full"
 												style="aspect-ratio: 16/9; max-height: 70vh;"
 												src={getVideoSource()}
-											onerror={(event) => {
-												console.warn('视频加载错误:', event);
-												if (videoData?.video.is_charge_video) {
-													chargeLockedDisplayMode = 'local';
-													showChargeLockedToast('local');
+												onerror={(event) => {
+													console.warn('视频加载错误:', event);
+													if (videoData?.video.is_charge_video) {
+														chargeLockedDisplayMode = 'local';
+														showChargeLockedToast('local');
 													}
 												}}
 												onloadstart={() => {

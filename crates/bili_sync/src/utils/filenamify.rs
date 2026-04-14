@@ -39,7 +39,7 @@ pub fn filenamify_with_options<S: AsRef<str>>(input: S, preserve_template_separa
     // 全角字符映射
     let fullwidth_colon = regex!("："); // 全角冒号 → 半角冒号
     let fullwidth_space = regex!("　"); // 全角空格 → 半角空格
-    // 其他可能有问题的字符（保留中文括号/书名号，避免过度清洗）
+                                        // 其他可能有问题的字符（保留中文括号/书名号，避免过度清洗）
     let problematic_chars = regex!("[★☆♪♫♬♩♭♮♯※‖§¶°±×÷≈≠≤≥∞∴∵∠⊥∥∧∨∩∪⊂⊃⊆⊇∈∉∃∀]");
 
     let replacement = "_";
@@ -199,6 +199,9 @@ mod tests {
             filenamify("〖周深｜MV〗《异人之下之决战！碧游村》主题曲《冰凌花》MV正式上线！"),
             "〖周深｜MV〗《异人之下之决战！碧游村》主题曲《冰凌花》MV正式上线！"
         );
-        assert_eq!(filenamify("【合集】『标题』〔测试〕〈特别篇〉"), "【合集】『标题』〔测试〕〈特别篇〉");
+        assert_eq!(
+            filenamify("【合集】『标题』〔测试〕〈特别篇〉"),
+            "【合集】『标题』〔测试〕〈特别篇〉"
+        );
     }
 }

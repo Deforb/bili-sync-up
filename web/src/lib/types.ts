@@ -40,6 +40,7 @@ export interface VideoSource {
 	name: string;
 	enabled: boolean;
 	path: string;
+	latest_row_at?: string | null; // 最近一条视频的发布时间（北京时间）
 	scan_deleted_videos: boolean;
 	scan_deleted_videos_once: boolean;
 	// 类型特有的ID字段
@@ -120,6 +121,10 @@ export interface PageInfo {
 	name: string;
 	download_status: [number, number, number, number, number];
 	path?: string;
+	danmaku_last_synced_at?: string;
+	danmaku_sync_generation: number;
+	danmaku_cid_snapshot?: number;
+	danmaku_last_write_count: number;
 }
 
 // 单个视频响应类型
@@ -290,6 +295,13 @@ export interface ConfigResponse {
 	danmaku_bold?: boolean;
 	danmaku_outline?: number;
 	danmaku_time_offset?: number;
+	danmaku_update_enabled?: boolean;
+	danmaku_update_fresh_days?: number;
+	danmaku_update_fresh_interval_hours?: number;
+	danmaku_update_mature_days?: number;
+	danmaku_update_mature_interval_days?: number;
+	danmaku_update_cold_days?: number;
+	danmaku_update_cold_interval_days?: number;
 	// 新增并发控制设置
 	concurrent_video?: number;
 	concurrent_page?: number;
@@ -421,6 +433,13 @@ export interface UpdateConfigRequest {
 	danmaku_bold?: boolean;
 	danmaku_outline?: number;
 	danmaku_time_offset?: number;
+	danmaku_update_enabled?: boolean;
+	danmaku_update_fresh_days?: number;
+	danmaku_update_fresh_interval_hours?: number;
+	danmaku_update_mature_days?: number;
+	danmaku_update_mature_interval_days?: number;
+	danmaku_update_cold_days?: number;
+	danmaku_update_cold_interval_days?: number;
 	// 新增并发控制设置
 	concurrent_video?: number;
 	concurrent_page?: number;
@@ -502,6 +521,12 @@ export interface UpdateConfigResponse {
 	updated_files?: number;
 	resetted_nfo_videos_count?: number;
 	resetted_nfo_pages_count?: number;
+}
+
+export interface RefreshDanmakuResponse {
+	success: boolean;
+	refreshed_pages: number;
+	message: string;
 }
 
 // 搜索请求类型

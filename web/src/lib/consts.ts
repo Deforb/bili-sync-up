@@ -12,4 +12,12 @@ export const VIDEO_SOURCES = {
 	BANGUMI: { type: 'bangumi', title: '番剧', icon: TvIcon }
 } as const;
 
+export const DANMAKU_SYNC_STAGE_LABELS: Record<number, string> = {
+	0: '未同步',
+	1: '新鲜期',
+	2: '成熟期',
+	3: '老化期',
+	4: '已冻结'
+};
+
 export type VideoSourceType = (typeof VIDEO_SOURCES)[keyof typeof VIDEO_SOURCES]['type'];

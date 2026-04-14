@@ -54,6 +54,7 @@ pub(crate) fn describe_config_key(key: &str) -> &'static str {
         "credential" => "B站登录凭证",
         "filter_option" => "画质与编码过滤",
         "danmaku_option" => "弹幕下载/样式设置",
+        "danmaku_update_policy" => "弹幕增量更新策略",
         "video_name" => "视频命名模板",
         "page_name" => "分页命名模板",
         "multi_page_name" => "多P分页命名模板",

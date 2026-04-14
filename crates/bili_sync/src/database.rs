@@ -2,7 +2,10 @@ use anyhow::Result;
 use bili_sync_migration::{Migrator, MigratorTrait};
 use sea_orm::sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sea_orm::sqlx::{self, Executor};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, ExecResult, QueryResult, SqlxSqliteConnector, Statement, StreamTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbBackend, DbErr, ExecResult, QueryResult, SqlxSqliteConnector, Statement,
+    StreamTrait,
+};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -59,9 +62,7 @@ fn is_database_locked_message(message: &str) -> bool {
 
 fn active_db_operation_snapshots(exclude_id: Option<u64>) -> Vec<ActiveDbOperationSnapshot> {
     let now = Instant::now();
-    let operations = ACTIVE_DB_OPERATIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let operations = ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner());
     let mut snapshot = operations
         .iter()
         .filter(|(id, _)| Some(**id) != exclude_id)
@@ -105,7 +106,12 @@ fn classify_active_db_operation_contention(
     }
 }
 
-fn log_active_db_operation_contention(message_prefix: &str, idle_message: &str, current: &str, exclude_id: Option<u64>) {
+fn log_active_db_operation_contention(
+    message_prefix: &str,
+    idle_message: &str,
+    current: &str,
+    exclude_id: Option<u64>,
+) {
     let occupied = active_db_operation_snapshots(exclude_id);
     let Some(level) = classify_active_db_operation_contention(&occupied) else {
         debug!("{}: {}", idle_message, current);
@@ -157,16 +163,13 @@ impl DbOperationGuard {
     fn begin_inner(name: String, started_at: Instant, emit_start_log: bool) -> Self {
         let id = NEXT_DB_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
 
-        ACTIVE_DB_OPERATIONS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                id,
-                ActiveDbOperation {
-                    name: name.clone(),
-                    started_at,
-                },
-            );
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            id,
+            ActiveDbOperation {
+                name: name.clone(),
+                started_at,
+            },
+        );
 
         if emit_start_log {
             log_active_db_operation_contention("数据库操作开始时检测到", "数据库操作开始", &name, Some(id));
@@ -221,7 +224,10 @@ impl DbOperationGuard {
                 self.name, stage, elapsed_ms
             );
         } else {
-            debug!("数据库操作结束: op={}, stage={}, elapsed={}ms", self.name, stage, elapsed_ms);
+            debug!(
+                "数据库操作结束: op={}, stage={}, elapsed={}ms",
+                self.name, stage, elapsed_ms
+            );
         }
     }
 }
@@ -649,6 +655,40 @@ async fn ensure_ai_renamed_column(connection: &DatabaseConnection) -> Result<()>
     Ok(())
 }
 
+async fn ensure_danmaku_last_write_count_column(connection: &DatabaseConnection) -> Result<()> {
+    use sea_orm::ConnectionTrait;
+
+    let backend = connection.get_database_backend();
+
+    let check_sql = "SELECT COUNT(*) FROM pragma_table_info('page') WHERE name = 'danmaku_last_write_count'";
+    let result: Option<i32> = connection
+        .query_one(sea_orm::Statement::from_string(backend, check_sql))
+        .await?
+        .and_then(|row| row.try_get_by_index(0).ok());
+
+    if let Some(count) = result {
+        if count >= 1 {
+            debug!("page.danmaku_last_write_count 字段已存在");
+            return Ok(());
+        }
+    }
+
+    let add_sql = "ALTER TABLE page ADD COLUMN danmaku_last_write_count INTEGER NOT NULL DEFAULT 0";
+    match connection
+        .execute(sea_orm::Statement::from_string(backend, add_sql))
+        .await
+    {
+        Ok(_) => info!("成功添加 page.danmaku_last_write_count 字段"),
+        Err(e) => {
+            if !e.to_string().contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// 预热数据库，将关键数据加载到内存映射中
 async fn preheat_database(connection: &DatabaseConnection) -> Result<()> {
     use sea_orm::ConnectionTrait;
@@ -703,6 +743,10 @@ pub async fn setup_database() -> DatabaseConnection {
     // 添加 page.ai_renamed 字段
     if let Err(e) = ensure_ai_renamed_column(&connection).await {
         tracing::warn!("添加 ai_renamed 字段失败: {}", e);
+    }
+
+    if let Err(e) = ensure_danmaku_last_write_count_column(&connection).await {
+        tracing::warn!("添加 danmaku_last_write_count 字段失败: {}", e);
     }
 
     // 预热数据库，加载热数据到内存映射
@@ -788,10 +832,7 @@ mod tests {
 
     impl Write for SharedLogWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend_from_slice(buf);
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -802,13 +843,7 @@ mod tests {
 
     impl SharedLogBuffer {
         fn contents(&self) -> String {
-            String::from_utf8(
-                self.0
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone(),
-            )
-            .unwrap_or_default()
+            String::from_utf8(self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()).unwrap_or_default()
         }
     }
 
@@ -856,10 +891,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_skips_contention_warning_for_short_overlap() -> anyhow::Result<()> {
-        ACTIVE_DB_OPERATIONS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let logs = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
@@ -870,16 +902,13 @@ mod tests {
             .finish();
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
-        ACTIVE_DB_OPERATIONS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                999,
-                ActiveDbOperation {
-                    name: "test.short_holder".to_string(),
-                    started_at: Instant::now() - std::time::Duration::from_millis(10),
-                },
-            );
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            999,
+            ActiveDbOperation {
+                name: "test.short_holder".to_string(),
+                started_at: Instant::now() - std::time::Duration::from_millis(10),
+            },
+        );
 
         run_traced_db_operation("test.short_contender", async { Ok::<_, anyhow::Error>(()) }).await?;
 
@@ -903,10 +932,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn traced_db_operation_logs_active_lock_holder_on_sqlite_lock() -> anyhow::Result<()> {
-        ACTIVE_DB_OPERATIONS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        ACTIVE_DB_OPERATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
         let logs = SharedLogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
@@ -926,7 +952,10 @@ mod tests {
             .await?;
 
         let lock_holder = begin_write_transaction(&connection_1, "test.lock_holder").await?;
-        tokio::time::sleep(std::time::Duration::from_millis((ACTIVE_DB_CONTENTION_WARN_MS + 20) as u64)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            (ACTIVE_DB_CONTENTION_WARN_MS + 20) as u64,
+        ))
+        .await;
 
         let err = run_traced_db_operation("test.contender", async {
             connection_2

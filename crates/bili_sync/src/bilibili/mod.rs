@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 pub use client::{BiliClient, Client, SearchResult};
 pub use collection::{Collection, CollectionEpisodeOrderStrategy, CollectionItem, CollectionType};
 pub use credential::Credential;
-pub use danmaku::DanmakuOption;
+pub use danmaku::{parse_event_name, DanmakuElem, DanmakuOption, DanmakuWriter};
 pub use dynamic::Dynamic;
 pub use error::BiliError;
 pub use favorite_list::FavoriteList;

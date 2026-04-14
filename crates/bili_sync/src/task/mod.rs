@@ -95,6 +95,13 @@ pub struct UpdateConfigTask {
     pub danmaku_bold: Option<bool>,
     pub danmaku_outline: Option<f64>,
     pub danmaku_time_offset: Option<f64>,
+    pub danmaku_update_enabled: Option<bool>,
+    pub danmaku_update_fresh_days: Option<u32>,
+    pub danmaku_update_fresh_interval_hours: Option<u32>,
+    pub danmaku_update_mature_days: Option<u32>,
+    pub danmaku_update_mature_interval_days: Option<u32>,
+    pub danmaku_update_cold_days: Option<u32>,
+    pub danmaku_update_cold_interval_days: Option<u32>,
     // 并发控制设置
     pub concurrent_video: Option<usize>,
     pub concurrent_page: Option<usize>,
@@ -2082,6 +2089,13 @@ impl ConfigTaskQueue {
                 danmaku_bold: task.danmaku_bold,
                 danmaku_outline: task.danmaku_outline,
                 danmaku_time_offset: task.danmaku_time_offset,
+                danmaku_update_enabled: task.danmaku_update_enabled,
+                danmaku_update_fresh_days: task.danmaku_update_fresh_days,
+                danmaku_update_fresh_interval_hours: task.danmaku_update_fresh_interval_hours,
+                danmaku_update_mature_days: task.danmaku_update_mature_days,
+                danmaku_update_mature_interval_days: task.danmaku_update_mature_interval_days,
+                danmaku_update_cold_days: task.danmaku_update_cold_days,
+                danmaku_update_cold_interval_days: task.danmaku_update_cold_interval_days,
                 // 并发控制设置
                 concurrent_video: task.concurrent_video,
                 concurrent_page: task.concurrent_page,
@@ -2433,7 +2447,11 @@ mod tests {
         let controller = Arc::new(TaskController::new());
         let wait_controller = controller.clone();
 
-        let waiter = tokio::spawn(async move { wait_controller.wait_for_scan_signal_or_timeout(Duration::from_secs(5)).await });
+        let waiter = tokio::spawn(async move {
+            wait_controller
+                .wait_for_scan_signal_or_timeout(Duration::from_secs(5))
+                .await
+        });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         controller.trigger_scan_now();

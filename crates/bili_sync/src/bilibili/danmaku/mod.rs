@@ -5,7 +5,7 @@ mod drawable;
 mod model;
 mod writer;
 
-pub use ass_writer::AssWriter;
+pub use ass_writer::{parse_event_name, AssWriter};
 pub use canvas::DanmakuOption;
 pub use danmu::Danmu;
 pub use drawable::{DrawEffect, Drawable};

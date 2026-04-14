@@ -20,7 +20,7 @@
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
-	import type { VideoSourcesResponse } from '$lib/types';
+	import type { VideoSource, VideoSourcesResponse } from '$lib/types';
 
 	// 图标导入
 	import PlusIcon from '@lucide/svelte/icons/plus';
@@ -41,7 +41,7 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
-	import type { VideoSource } from '$lib/types';
+	import { formatTimestamp } from '$lib/utils/timezone';
 
 	let loading = false;
 	let bulkUpdating = false;
@@ -129,6 +129,47 @@
 		enableBangumi: false,
 		renameParentDir: false
 	};
+
+	function normalizeBeijingDateTime(value: string | null | undefined): string | null {
+		if (!value || value === '1970-01-01 00:00:00') return null;
+		if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) {
+			return `${value.replace(' ', 'T')}+08:00`;
+		}
+		return value;
+	}
+
+	function formatLatestVideoTime(value: string | null | undefined): string {
+		const normalized = normalizeBeijingDateTime(value);
+		if (!normalized) return '-';
+		const formatted = formatTimestamp(normalized, 'Asia/Shanghai', 'datetime');
+		return formatted === '无效时间' || formatted === '格式化失败' ? value ?? '-' : formatted;
+	}
+
+	function getLatestVideoAgeDays(value: string | null | undefined): number | null {
+		const normalized = normalizeBeijingDateTime(value);
+		if (!normalized) return null;
+
+		const timestamp = new Date(normalized).getTime();
+		if (Number.isNaN(timestamp)) return null;
+
+		const diffMs = Date.now() - timestamp;
+		if (diffMs <= 0) return 0;
+		return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+	}
+
+	function getLatestVideoTimeBadgeClass(value: string | null | undefined): string {
+		const ageDays = getLatestVideoAgeDays(value);
+		if (ageDays === null) {
+			return 'text-muted-foreground';
+		}
+		if (ageDays <= 7) {
+			return 'border-green-200 bg-green-50 text-green-700 dark:border-green-800 dark:bg-green-950/20 dark:text-green-300';
+		}
+		if (ageDays <= 30) {
+			return 'border-yellow-200 bg-yellow-50 text-yellow-700 dark:border-yellow-800 dark:bg-yellow-950/20 dark:text-yellow-300';
+		}
+		return 'border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/20 dark:text-red-300';
+	}
 
 	async function loadVideoSources() {
 		const response = await runRequest(() => api.getVideoSources(), {
@@ -1135,7 +1176,12 @@
 	<!-- 页面头部 -->
 	<div class="flex {isMobile ? 'flex-col gap-4' : 'flex-row items-center justify-between gap-4'}">
 		<div>
-			<h1 class="{isMobile ? 'text-xl' : 'text-2xl'} font-bold">视频源管理</h1>
+			<h1
+				class="{isMobile ? 'text-xl' : 'text-2xl'} font-bold"
+				title="管理和配置收藏夹、合集、投稿、番剧与稍后再看视频源"
+			>
+				视频源管理
+			</h1>
 			<p class="{isMobile ? 'text-sm' : 'text-base'} text-muted-foreground">
 				管理和配置您的视频源，包括收藏夹、合集、投稿和稍后再看
 			</p>
@@ -1143,6 +1189,7 @@
 		<Button
 			onclick={navigateToAddSource}
 			class="flex items-center gap-2 {isMobile ? 'w-full' : 'w-auto'}"
+			title="添加新的视频源"
 		>
 			<PlusIcon class="h-4 w-4" />
 			添加视频源
@@ -1162,7 +1209,10 @@
 					: []}
 				<Card>
 					<CardHeader class="cursor-pointer" onclick={() => toggleCollapse(sourceKey)}>
-						<CardTitle class="flex items-center gap-2">
+						<CardTitle
+							class="flex items-center gap-2"
+							title={`展开或收起${sourceConfig.title}列表`}
+						>
 							{#if collapsedSections[sourceKey] !== false}
 								<ChevronRightIcon class="text-muted-foreground h-4 w-4" />
 							{:else}
@@ -1181,13 +1231,19 @@
 								<div class="mb-4 rounded-lg border p-4">
 									<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
 										<div class="space-y-1">
-											<div class="text-sm font-semibold">投稿源扫描优化</div>
+											<div
+												class="text-sm font-semibold"
+												title="配置投稿源的分批扫描和自适应扫描策略"
+											>
+												投稿源扫描优化
+											</div>
 											<div class="text-muted-foreground text-xs">
 												分批扫描可降低单轮请求量；自适应可对长期无更新的UP自动降频，减少风控概率。
 											</div>
 											<div class="text-muted-foreground text-xs">
-												当前：每轮 {submissionScanBatchSize || '0'} 个
-												· 自适应 {submissionAdaptiveScan ? '已开启' : '已关闭'}
+												当前：每轮 {submissionScanBatchSize || '0'} 个 · 自适应 {submissionAdaptiveScan
+													? '已开启'
+													: '已关闭'}
 												· 最大间隔 {submissionAdaptiveMaxHours || '24'} 小时
 											</div>
 										</div>
@@ -1201,7 +1257,11 @@
 											>
 												刷新
 											</Button>
-											<Button size="sm" disabled={submissionScanConfigSaving} onclick={openSubmissionScanConfigDialog}>
+											<Button
+												size="sm"
+												disabled={submissionScanConfigSaving}
+												onclick={openSubmissionScanConfigDialog}
+											>
 												弹窗配置
 											</Button>
 										</div>
@@ -1298,11 +1358,23 @@
 														{source.enabled ? '已启用' : '已禁用'}
 													</Badge>
 												</div>
-												<div class="text-muted-foreground truncate text-sm" title={source.path}>
-													{source.path || '未设置路径'}
-												</div>
-												<!-- 显示对应类型的ID -->
-												<div class="text-muted-foreground mt-1 text-xs">
+											<div class="text-muted-foreground truncate text-sm" title={source.path}>
+												{source.path || '未设置路径'}
+											</div>
+											<div
+												class="text-muted-foreground mt-1 flex items-center gap-2 text-xs"
+												title="该视频源当前已发现的最新一条视频发布时间。最近 7 天内为绿色，8 到 30 天为黄色，31 天及以上为红色，可用于判断这个源最近是否还有更新"
+											>
+												<span>最新视频时间：</span>
+												<Badge
+													variant="outline"
+													class={getLatestVideoTimeBadgeClass(source.latest_row_at)}
+												>
+													{formatLatestVideoTime(source.latest_row_at)}
+												</Badge>
+											</div>
+											<!-- 显示对应类型的ID -->
+											<div class="text-muted-foreground mt-1 text-xs">
 													{#if sourceConfig.type === 'favorite' && source.f_id}
 														收藏夹ID: {source.f_id}
 													{:else if sourceConfig.type === 'collection' && source.s_id}
@@ -1344,9 +1416,7 @@
 												{#if source.scan_deleted_videos}
 													<div class="mt-1 text-xs text-blue-600">扫描删除视频已持续启用</div>
 												{:else if source.scan_deleted_videos_once}
-													<div class="mt-1 text-xs text-orange-600">
-														本轮扫描删除视频已启用
-													</div>
+													<div class="mt-1 text-xs text-orange-600">本轮扫描删除视频已启用</div>
 												{/if}
 												{#if source.keyword_filters && source.keyword_filters.length > 0}
 													<div class="mt-1 text-xs text-purple-600">
@@ -1430,7 +1500,9 @@
 														class="h-8 w-8 p-0"
 													>
 														<ActivityIcon
-															class="h-4 w-4 {source.use_dynamic_api ? 'text-blue-600' : 'text-gray-400'}"
+															class="h-4 w-4 {source.use_dynamic_api
+																? 'text-blue-600'
+																: 'text-gray-400'}"
 														/>
 													</Button>
 												{/if}
@@ -1457,7 +1529,9 @@
 															source.id,
 															source.scan_deleted_videos
 														)}
-													title={source.scan_deleted_videos ? '关闭持续扫描已删除' : '持续启用扫描已删除'}
+													title={source.scan_deleted_videos
+														? '关闭持续扫描已删除'
+														: '持续启用扫描已删除'}
 													class="h-8 w-8 p-0"
 												>
 													<RotateCcwIcon
@@ -1724,7 +1798,7 @@
 <AlertDialog.Root bind:open={showSubmissionScanConfigDialog}>
 	<AlertDialog.Content class="max-w-2xl">
 		<AlertDialog.Header>
-			<AlertDialog.Title>投稿源扫描优化</AlertDialog.Title>
+			<AlertDialog.Title title="配置投稿源扫描优化策略">投稿源扫描优化</AlertDialog.Title>
 			<AlertDialog.Description>
 				分批扫描可降低单轮请求量；自适应会对长期无更新的UP自动降频，减少风控概率。
 			</AlertDialog.Description>
@@ -1761,7 +1835,9 @@
 					min="1"
 					max="168"
 					step="1"
-					disabled={!submissionAdaptiveScan || submissionScanConfigLoading || submissionScanConfigSaving}
+					disabled={!submissionAdaptiveScan ||
+						submissionScanConfigLoading ||
+						submissionScanConfigSaving}
 					bind:value={submissionAdaptiveMaxHours}
 				/>
 				<div class="text-muted-foreground text-xs">范围 1~168。</div>

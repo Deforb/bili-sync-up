@@ -25,6 +25,12 @@ pub struct Model {
     pub play_audio_streams: Option<String>,
     pub play_subtitle_streams: Option<String>,
     pub play_streams_updated_at: Option<String>,
+    pub danmaku_last_synced_at: Option<String>,
+    #[sea_orm(default_value = "0")]
+    pub danmaku_sync_generation: u32,
+    pub danmaku_cid_snapshot: Option<i64>,
+    #[sea_orm(default_value = "0")]
+    pub danmaku_last_write_count: u32,
     /// 是否已被 AI 重命名
     #[sea_orm(default_value = "0")]
     pub ai_renamed: Option<i32>,

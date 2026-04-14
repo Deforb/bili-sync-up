@@ -14,6 +14,7 @@ import type {
 	DeleteVideoSourceResponse,
 	DeleteVideoResponse,
 	ConfigResponse,
+	RefreshDanmakuResponse,
 	UpdateConfigRequest,
 	UpdateConfigResponse,
 	SearchRequest,
@@ -228,6 +229,14 @@ class ApiClient {
 	 */
 	async getVideo(id: number): Promise<ApiResponse<VideoResponse>> {
 		return this.get<VideoResponse>(`/videos/${id}`);
+	}
+
+	async refreshVideoDanmaku(id: number): Promise<ApiResponse<RefreshDanmakuResponse>> {
+		return this.post<RefreshDanmakuResponse>(`/videos/${id}/refresh-danmaku`);
+	}
+
+	async refreshPageDanmaku(id: number): Promise<ApiResponse<RefreshDanmakuResponse>> {
+		return this.post<RefreshDanmakuResponse>(`/pages/${id}/refresh-danmaku`);
 	}
 
 	/**
@@ -988,6 +997,10 @@ export const api = {
 	 * 获取单个视频详情
 	 */
 	getVideo: (id: number) => apiClient.getVideo(id),
+
+	refreshVideoDanmaku: (id: number) => apiClient.refreshVideoDanmaku(id),
+
+	refreshPageDanmaku: (id: number) => apiClient.refreshPageDanmaku(id),
 
 	/**
 	 * 重置视频下载状态

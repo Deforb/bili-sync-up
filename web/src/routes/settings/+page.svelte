@@ -124,6 +124,25 @@
 		}
 	];
 
+	const settingTooltips = {
+		naming: '调整视频、分页、番剧等文件命名规则，以及目录结构和媒体库兼容方式。',
+		quality: '限制视频与音频清晰度、编码格式和优先选择范围。',
+		download: '控制下载并发、速率限制、任务执行方式和下载器行为。',
+		danmaku: '配置弹幕文件的显示样式、布局参数和同步策略。',
+		credential: '填写 B 站登录凭证，影响会员画质、互动内容和受限接口访问。',
+		risk: '调整投稿源扫描时的风控规避策略、批量设置和延迟参数。',
+		captcha: '设置遇到验证码风控时的处理模式、超时和自动识别参数。',
+		aria2: '配置外部 Aria2 的健康检查、自动重启和监控策略。',
+		interface: '调整主题模式和前端界面显示偏好。',
+		notification: '配置扫描完成后的推送渠道、测试发送和通知内容。',
+		ai_rename: '配置 AI 自动重命名的启用范围、提示词和相关行为。',
+		system: '调整扫描间隔、监听端口、路径模板和基础系统行为。'
+	} as const;
+
+	function getSettingTooltip(id: string) {
+		return settingTooltips[id as keyof typeof settingTooltips] ?? '';
+	}
+
 	// 表单数据
 	let videoName = '{{upper_name}}';
 	let pageName = '{{pubtime}}-{{bvid}}-{{truncate title 20}}';
@@ -165,6 +184,13 @@
 	let danmakuBold = true;
 	let danmakuOutline = 0.8;
 	let danmakuTimeOffset = 0.0;
+	let danmakuUpdateEnabled = false;
+	let danmakuUpdateFreshDays = 3;
+	let danmakuUpdateFreshIntervalHours = 6;
+	let danmakuUpdateMatureDays = 30;
+	let danmakuUpdateMatureIntervalDays = 3;
+	let danmakuUpdateColdDays = 180;
+	let danmakuUpdateColdIntervalDays = 30;
 
 	// 并发控制设置
 	let concurrentVideo = 3;
@@ -289,6 +315,17 @@
 
 	// 显示帮助信息的状态（在文件命名抽屉中使用）
 	let showHelp = false;
+
+	const danmakuUpdateHelp = {
+		section:
+			'已下载分页会按视频发布时间分阶段刷新弹幕。新鲜期刷新更频繁，成熟期和老化期逐步放缓，超过老化期后会进入冷冻阶段并停止后台轮询。',
+		freshDays: '视频发布后，落在这个天数范围内的分页会被视为新鲜期。',
+		freshIntervalHours: '新鲜期内后台检查弹幕更新的间隔，单位是小时。',
+		matureDays: '超过新鲜期、但还没达到这个天数的分页会进入成熟期。',
+		matureIntervalDays: '成熟期内后台检查弹幕更新的间隔，单位是天。',
+		coldDays: '超过成熟期、但还没达到这个天数的分页会进入老化期；再往后会停止后台轮询。',
+		coldIntervalDays: '老化期内后台检查弹幕更新的间隔，单位是天。'
+	};
 
 	// 验证相关状态
 	let pageNameError = '';
@@ -508,6 +545,13 @@
 		danmakuBold = config.danmaku_bold !== undefined ? config.danmaku_bold : true;
 		danmakuOutline = config.danmaku_outline || 0.8;
 		danmakuTimeOffset = config.danmaku_time_offset || 0.0;
+		danmakuUpdateEnabled = config.danmaku_update_enabled ?? false;
+		danmakuUpdateFreshDays = config.danmaku_update_fresh_days ?? 3;
+		danmakuUpdateFreshIntervalHours = config.danmaku_update_fresh_interval_hours ?? 6;
+		danmakuUpdateMatureDays = config.danmaku_update_mature_days ?? 30;
+		danmakuUpdateMatureIntervalDays = config.danmaku_update_mature_interval_days ?? 3;
+		danmakuUpdateColdDays = config.danmaku_update_cold_days ?? 180;
+		danmakuUpdateColdIntervalDays = config.danmaku_update_cold_interval_days ?? 30;
 
 		// 并发控制设置
 		concurrentVideo = config.concurrent_video || 3;
@@ -822,6 +866,13 @@
 			danmaku_bold: danmakuBold,
 			danmaku_outline: danmakuOutline,
 			danmaku_time_offset: danmakuTimeOffset,
+			danmaku_update_enabled: danmakuUpdateEnabled,
+			danmaku_update_fresh_days: danmakuUpdateFreshDays,
+			danmaku_update_fresh_interval_hours: danmakuUpdateFreshIntervalHours,
+			danmaku_update_mature_days: danmakuUpdateMatureDays,
+			danmaku_update_mature_interval_days: danmakuUpdateMatureIntervalDays,
+			danmaku_update_cold_days: danmakuUpdateColdDays,
+			danmaku_update_cold_interval_days: danmakuUpdateColdIntervalDays,
 			// 并发控制设置
 			concurrent_video: concurrentVideo,
 			concurrent_page: concurrentPage,
@@ -1202,7 +1253,12 @@
 <div class="py-2">
 	<div class="mx-auto px-4">
 		<div class="bg-card rounded-lg border shadow-sm {isMobile ? 'p-4' : 'p-6'}">
-			<h1 class="font-bold {isMobile ? 'mb-4 text-xl' : 'mb-6 text-2xl'}">系统设置</h1>
+			<h1
+				class="font-bold {isMobile ? 'mb-4 text-xl' : 'mb-6 text-2xl'}"
+				title="管理下载、命名、弹幕、通知和系统行为等配置"
+			>
+				系统设置
+			</h1>
 
 			{#if loading}
 				<div class="flex items-center justify-center py-12">
@@ -1229,9 +1285,12 @@
 										/>
 									</div>
 									<div class="flex-1">
-										<CardTitle class={isMobile ? 'text-sm' : 'text-base'}
-											>{category.title}</CardTitle
+										<CardTitle
+											class={isMobile ? 'text-sm' : 'text-base'}
+											title={getSettingTooltip(category.id)}
 										>
+											{category.title}
+										</CardTitle>
 										<CardDescription class="mt-1 {isMobile ? 'text-xs' : 'text-sm'} line-clamp-2"
 											>{category.description}</CardDescription
 										>
@@ -1254,6 +1313,7 @@
 	}}
 	title="文件命名设置"
 	description="配置视频、分页、番剧等文件命名模板"
+	titleTooltip={getSettingTooltip('naming')}
 	{isMobile}
 >
 	<form
@@ -1264,7 +1324,10 @@
 		class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}"
 	>
 		<div class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
-			<SectionHeader title="文件命名模板">
+			<SectionHeader
+				title="文件命名模板"
+				titleTooltip="配置视频、分页和番剧的命名模板与变量规则。"
+			>
 				{#snippet actions()}
 					<button
 						type="button"
@@ -1634,6 +1697,7 @@
 	}}
 	title="视频质量设置"
 	description="设置视频/音频质量、编解码器等参数"
+	titleTooltip={getSettingTooltip('quality')}
 	{isMobile}
 >
 	<form
@@ -1847,6 +1911,7 @@
 	}}
 	title="下载设置"
 	description="并行下载、并发控制、速率限制配置"
+	titleTooltip={getSettingTooltip('download')}
 	{isMobile}
 >
 	<form
@@ -1989,6 +2054,7 @@
 	}}
 	title="弹幕设置"
 	description="弹幕显示样式和布局参数"
+	titleTooltip={getSettingTooltip('danmaku')}
 	{isMobile}
 >
 	<form
@@ -2141,6 +2207,127 @@
 				</div>
 			</div>
 
+			<div class="rounded-lg border p-4">
+				<div class="mb-4 flex items-center justify-between gap-3">
+					<div>
+						<h5 class="cursor-help font-medium" title={danmakuUpdateHelp.section}>弹幕增量更新</h5>
+						<p class="text-muted-foreground mt-1 text-sm">
+							按视频发布时间分阶段刷新已下载分页的弹幕，并在冷冻期后停止后台轮询。
+						</p>
+					</div>
+					<label class="flex items-center gap-2 text-sm">
+						<input
+							type="checkbox"
+							bind:checked={danmakuUpdateEnabled}
+							class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+						/>
+						<span>启用</span>
+					</label>
+				</div>
+
+				<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+					<div class="space-y-2">
+						<Label for="danmaku-update-fresh-days" class="cursor-help" title={danmakuUpdateHelp.freshDays}
+							>新鲜期天数</Label
+						>
+						<Input
+							id="danmaku-update-fresh-days"
+							type="number"
+							bind:value={danmakuUpdateFreshDays}
+							min="0"
+							placeholder="3"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-fresh-hours"
+							class="cursor-help"
+							title={danmakuUpdateHelp.freshIntervalHours}
+						>
+							新鲜期刷新间隔（小时）
+						</Label>
+						<Input
+							id="danmaku-update-fresh-hours"
+							type="number"
+							bind:value={danmakuUpdateFreshIntervalHours}
+							min="1"
+							placeholder="6"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-mature-days"
+							class="cursor-help"
+							title={danmakuUpdateHelp.matureDays}
+						>
+							成熟期截至天数
+						</Label>
+						<Input
+							id="danmaku-update-mature-days"
+							type="number"
+							bind:value={danmakuUpdateMatureDays}
+							min="0"
+							placeholder="30"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-mature-interval"
+							class="cursor-help"
+							title={danmakuUpdateHelp.matureIntervalDays}
+						>
+							成熟期刷新间隔（天）
+						</Label>
+						<Input
+							id="danmaku-update-mature-interval"
+							type="number"
+							bind:value={danmakuUpdateMatureIntervalDays}
+							min="1"
+							placeholder="3"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label for="danmaku-update-cold-days" class="cursor-help" title={danmakuUpdateHelp.coldDays}
+							>老化期截至天数</Label
+						>
+						<Input
+							id="danmaku-update-cold-days"
+							type="number"
+							bind:value={danmakuUpdateColdDays}
+							min="0"
+							placeholder="180"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+
+					<div class="space-y-2">
+						<Label
+							for="danmaku-update-cold-interval"
+							class="cursor-help"
+							title={danmakuUpdateHelp.coldIntervalDays}
+						>
+							老化期刷新间隔（天）
+						</Label>
+						<Input
+							id="danmaku-update-cold-interval"
+							type="number"
+							bind:value={danmakuUpdateColdIntervalDays}
+							min="1"
+							placeholder="30"
+							disabled={!danmakuUpdateEnabled}
+						/>
+					</div>
+				</div>
+			</div>
+
 			<div
 				class="rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800 dark:bg-green-950/20"
 			>
@@ -2170,6 +2357,7 @@
 	}}
 	title="B站凭证设置"
 	description="配置B站登录凭证信息"
+	titleTooltip={getSettingTooltip('credential')}
 	{isMobile}
 >
 	<div slot="header">
@@ -2349,6 +2537,7 @@
 	}}
 	title="风控配置"
 	description="UP主投稿获取风控策略，用于优化大量视频UP主的获取"
+	titleTooltip={getSettingTooltip('risk')}
 	{isMobile}
 >
 	<form
@@ -2682,6 +2871,7 @@
 	}}
 	title="Aria2监控设置"
 	description="下载器健康检查和自动重启配置"
+	titleTooltip={getSettingTooltip('aria2')}
 	{isMobile}
 >
 	<form
@@ -2827,6 +3017,7 @@
 	}}
 	title="界面设置"
 	description="主题模式、显示选项等界面配置"
+	titleTooltip={getSettingTooltip('interface')}
 	{isMobile}
 >
 	<div class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}">
@@ -2838,6 +3029,7 @@
 						as="div"
 						title="主题模式"
 						description="选择您偏好的界面主题"
+						titleTooltip="切换浅色、深色或跟随系统的界面主题。"
 						titleClass="text-lg font-medium"
 						descriptionClass="text-muted-foreground text-sm"
 					>
@@ -2917,6 +3109,7 @@
 	}}
 	title="系统设置"
 	description="扫描间隔等其他设置"
+	titleTooltip={getSettingTooltip('system')}
 	{isMobile}
 >
 	<form
@@ -3093,6 +3286,7 @@
 	}}
 	title="推送通知设置"
 	description="配置扫描完成推送通知"
+	titleTooltip={getSettingTooltip('notification')}
 	{isMobile}
 >
 	<form
@@ -3560,6 +3754,7 @@
 	}}
 	title="验证码风控设置"
 	description="v_voucher验证码风控配置，用于处理B站的风控验证"
+	titleTooltip={getSettingTooltip('captcha')}
 	{isMobile}
 >
 	<form
@@ -3726,6 +3921,7 @@
 	}}
 	title="AI重命名设置"
 	description="配置AI自动重命名功能，使用大语言模型为视频文件生成更好的文件名"
+	titleTooltip={getSettingTooltip('ai_rename')}
 	{isMobile}
 >
 	<form

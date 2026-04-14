@@ -43,9 +43,9 @@ use crate::api::response::{
     ConfigMigrationReportResponse, ConfigMigrationStatusResponse, ConfigReloadResponse, ConfigResponse,
     ConfigValidationResponse, DashBoardResponse, DeleteVideoResponse, DeleteVideoSourceResponse,
     HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
-    QRUserInfo, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse, SetupAuthTokenResponse,
-    SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse, UpdateVideoStatusResponse, VideoInfo,
-    VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
+    QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
+    SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
+    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -800,8 +800,7 @@ mod reset_path_tests {
         let new_video_path = "/new-base/收藏夹/合集A";
         let old_page_path = "/downloads/收藏夹/合集A/Season 01/S01E001 - 测试页.m4s";
 
-        let remapped =
-            remap_page_path_with_video_prefix(old_page_path, old_video_path, new_video_path);
+        let remapped = remap_page_path_with_video_prefix(old_page_path, old_video_path, new_video_path);
 
         assert_eq!(
             remapped.as_deref(),
@@ -1036,6 +1035,10 @@ mod queue_sse_tests {
             play_audio_streams: Set(None),
             play_subtitle_streams: Set(None),
             play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
             ai_renamed: sea_orm::ActiveValue::NotSet,
         }
         .insert(db)
@@ -1328,11 +1331,24 @@ mod queue_sse_tests {
         assert!(!submission.scan_deleted_videos);
         assert!(submission.scan_deleted_videos_once);
     }
+
+    #[test]
+    fn test_normalize_video_source_latest_row_at_filters_initial_value() {
+        assert_eq!(normalize_video_source_latest_row_at(""), None);
+        assert_eq!(
+            normalize_video_source_latest_row_at("1970-01-01 00:00:00"),
+            None
+        );
+        assert_eq!(
+            normalize_video_source_latest_row_at("2026-04-14 12:34:56"),
+            Some("2026-04-14 12:34:56".to_string())
+        );
+    }
 }
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -1468,6 +1484,7 @@ pub async fn get_video_sources(
                 name: model.name,
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1529,6 +1546,7 @@ pub async fn get_video_sources(
                 name: model.name,
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: Some(model.f_id),
@@ -1590,6 +1608,7 @@ pub async fn get_video_sources(
                 name: model.upper_name.clone(),
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1651,6 +1670,7 @@ pub async fn get_video_sources(
                 name: "稍后再看".to_string(),
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1731,6 +1751,7 @@ pub async fn get_video_sources(
                 name: model.name,
                 enabled: model.enabled,
                 path: model.path,
+                latest_row_at: normalize_video_source_latest_row_at(&model.latest_row_at),
                 scan_deleted_videos: model.scan_deleted_videos,
                 scan_deleted_videos_once: model.scan_deleted_videos_once,
                 f_id: None,
@@ -1778,6 +1799,15 @@ pub async fn get_video_sources(
         watch_later: watch_later_sources,
         bangumi: bangumi_sources,
     }))
+}
+
+fn normalize_video_source_latest_row_at(latest_row_at: &str) -> Option<String> {
+    let trimmed = latest_row_at.trim();
+    if trimmed.is_empty() || trimmed == "1970-01-01 00:00:00" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn resolve_collection_aggregate_season_number(up_id: i64, s_id: i64, collection_type: i32) -> Option<i32> {
@@ -2440,8 +2470,22 @@ pub async fn get_video(
             page::Column::Name,
             page::Column::DownloadStatus,
             page::Column::Path,
+            page::Column::DanmakuLastSyncedAt,
+            page::Column::DanmakuSyncGeneration,
+            page::Column::DanmakuCidSnapshot,
+            page::Column::DanmakuLastWriteCount,
         ])
-        .into_tuple::<(i32, i32, String, u32, Option<String>)>()
+        .into_tuple::<(
+            i32,
+            i32,
+            String,
+            u32,
+            Option<String>,
+            Option<String>,
+            u32,
+            Option<i64>,
+            u32,
+        )>()
         .all(db.as_ref())
         .await?
         .into_iter()
@@ -2450,6 +2494,58 @@ pub async fn get_video(
     Ok(ApiResponse::ok(VideoResponse {
         video: video_info,
         pages,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/videos/{id}/refresh-danmaku",
+    params(
+        ("id" = i32, Path, description = "Video ID")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<RefreshDanmakuResponse>),
+    )
+)]
+pub async fn refresh_video_danmaku(
+    Path(id): Path<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<RefreshDanmakuResponse>, ApiError> {
+    let config = crate::config::reload_config();
+    let bili_client = crate::bilibili::BiliClient::new(String::new());
+    let refreshed_pages =
+        crate::workflow_danmaku::refresh_danmaku_for_video(id, &bili_client, db.as_ref(), &config).await?;
+
+    Ok(ApiResponse::ok(RefreshDanmakuResponse {
+        success: true,
+        refreshed_pages,
+        message: format!("已刷新 {} 个分页的弹幕", refreshed_pages),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/pages/{id}/refresh-danmaku",
+    params(
+        ("id" = i32, Path, description = "Page ID")
+    ),
+    responses(
+        (status = 200, body = ApiResponse<RefreshDanmakuResponse>),
+    )
+)]
+pub async fn refresh_page_danmaku(
+    Path(id): Path<i32>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<RefreshDanmakuResponse>, ApiError> {
+    let config = crate::config::reload_config();
+    let bili_client = crate::bilibili::BiliClient::new(String::new());
+    let refreshed_pages =
+        crate::workflow_danmaku::refresh_danmaku_for_page(id, &bili_client, db.as_ref(), &config).await?;
+
+    Ok(ApiResponse::ok(RefreshDanmakuResponse {
+        success: true,
+        refreshed_pages,
+        message: "已刷新当前分页的弹幕".to_string(),
     }))
 }
 
@@ -7227,6 +7323,10 @@ async fn validate_path_reset_safety(
                 play_audio_streams: None,
                 play_subtitle_streams: None,
                 play_streams_updated_at: None,
+                danmaku_last_synced_at: None,
+                danmaku_sync_generation: 0,
+                danmaku_cid_snapshot: None,
+                danmaku_last_write_count: 0,
                 ai_renamed: None,
             };
 
@@ -7747,14 +7847,8 @@ fn remap_page_path_with_video_prefix(
 ) -> Option<String> {
     let candidate_prefixes = [
         (old_video_path.to_string(), new_video_path.to_string()),
-        (
-            old_video_path.replace('/', "\\"),
-            new_video_path.replace('/', "\\"),
-        ),
-        (
-            old_video_path.replace('\\', "/"),
-            new_video_path.replace('\\', "/"),
-        ),
+        (old_video_path.replace('/', "\\"), new_video_path.replace('/', "\\")),
+        (old_video_path.replace('\\', "/"), new_video_path.replace('\\', "/")),
     ];
 
     for (old_prefix, new_prefix) in candidate_prefixes {
@@ -7845,10 +7939,7 @@ async fn regenerate_video_and_page_paths_correctly(
 
         page::Entity::update_many()
             .filter(page::Column::Id.eq(page_model.id))
-            .col_expr(
-                page::Column::Path,
-                Expr::value(full_new_page_path),
-            )
+            .col_expr(page::Column::Path, Expr::value(full_new_page_path))
             .exec(txn)
             .await?;
     }
@@ -7955,6 +8046,13 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         danmaku_bold: config.danmaku_option.bold,
         danmaku_outline: config.danmaku_option.outline,
         danmaku_time_offset: config.danmaku_option.time_offset,
+        danmaku_update_enabled: config.danmaku_update_policy.enabled,
+        danmaku_update_fresh_days: config.danmaku_update_policy.fresh_days,
+        danmaku_update_fresh_interval_hours: config.danmaku_update_policy.fresh_interval_hours,
+        danmaku_update_mature_days: config.danmaku_update_policy.mature_days,
+        danmaku_update_mature_interval_days: config.danmaku_update_policy.mature_interval_days,
+        danmaku_update_cold_days: config.danmaku_update_policy.cold_days,
+        danmaku_update_cold_interval_days: config.danmaku_update_policy.cold_interval_days,
         // 并发控制设置
         concurrent_video: config.concurrent_limit.video,
         concurrent_page: config.concurrent_limit.page,
@@ -8125,6 +8223,13 @@ pub async fn update_config(
             danmaku_bold: params.danmaku_bold,
             danmaku_outline: params.danmaku_outline,
             danmaku_time_offset: params.danmaku_time_offset,
+            danmaku_update_enabled: params.danmaku_update_enabled,
+            danmaku_update_fresh_days: params.danmaku_update_fresh_days,
+            danmaku_update_fresh_interval_hours: params.danmaku_update_fresh_interval_hours,
+            danmaku_update_mature_days: params.danmaku_update_mature_days,
+            danmaku_update_mature_interval_days: params.danmaku_update_mature_interval_days,
+            danmaku_update_cold_days: params.danmaku_update_cold_days,
+            danmaku_update_cold_interval_days: params.danmaku_update_cold_interval_days,
             // 并发控制设置
             concurrent_video: params.concurrent_video,
             concurrent_page: params.concurrent_page,
@@ -8228,6 +8333,13 @@ fn config_update_field_display_name(field: &str) -> String {
         "danmaku_bold" => Some("弹幕加粗"),
         "danmaku_outline" => Some("弹幕描边"),
         "danmaku_time_offset" => Some("弹幕时间偏移"),
+        "danmaku_update_enabled" => Some("弹幕增量更新开关"),
+        "danmaku_update_fresh_days" => Some("弹幕新鲜期天数"),
+        "danmaku_update_fresh_interval_hours" => Some("弹幕新鲜期刷新间隔"),
+        "danmaku_update_mature_days" => Some("弹幕成熟期天数"),
+        "danmaku_update_mature_interval_days" => Some("弹幕成熟期刷新间隔"),
+        "danmaku_update_cold_days" => Some("弹幕老化期天数"),
+        "danmaku_update_cold_interval_days" => Some("弹幕老化期刷新间隔"),
         "concurrent_video" => Some("同时处理视频数"),
         "concurrent_page" => Some("每视频并发分页数"),
         "rate_limit" => Some("请求频率限制"),
@@ -8719,6 +8831,68 @@ pub async fn update_config_internal(
             config.danmaku_option.time_offset = time_offset;
             updated_fields.push("danmaku_time_offset");
         }
+    }
+
+    if let Some(enabled) = params.danmaku_update_enabled {
+        if enabled != config.danmaku_update_policy.enabled {
+            config.danmaku_update_policy.enabled = enabled;
+            updated_fields.push("danmaku_update_enabled");
+        }
+    }
+
+    if let Some(days) = params.danmaku_update_fresh_days {
+        if days != config.danmaku_update_policy.fresh_days {
+            config.danmaku_update_policy.fresh_days = days;
+            updated_fields.push("danmaku_update_fresh_days");
+        }
+    }
+
+    if let Some(hours) = params.danmaku_update_fresh_interval_hours {
+        if hours == 0 {
+            return Err(anyhow!("弹幕新鲜期刷新间隔必须大于 0").into());
+        }
+        if hours != config.danmaku_update_policy.fresh_interval_hours {
+            config.danmaku_update_policy.fresh_interval_hours = hours;
+            updated_fields.push("danmaku_update_fresh_interval_hours");
+        }
+    }
+
+    if let Some(days) = params.danmaku_update_mature_days {
+        if days != config.danmaku_update_policy.mature_days {
+            config.danmaku_update_policy.mature_days = days;
+            updated_fields.push("danmaku_update_mature_days");
+        }
+    }
+
+    if let Some(days) = params.danmaku_update_mature_interval_days {
+        if days == 0 {
+            return Err(anyhow!("弹幕成熟期刷新间隔必须大于 0").into());
+        }
+        if days != config.danmaku_update_policy.mature_interval_days {
+            config.danmaku_update_policy.mature_interval_days = days;
+            updated_fields.push("danmaku_update_mature_interval_days");
+        }
+    }
+
+    if let Some(days) = params.danmaku_update_cold_days {
+        if days != config.danmaku_update_policy.cold_days {
+            config.danmaku_update_policy.cold_days = days;
+            updated_fields.push("danmaku_update_cold_days");
+        }
+    }
+
+    if let Some(days) = params.danmaku_update_cold_interval_days {
+        if days == 0 {
+            return Err(anyhow!("弹幕老化期刷新间隔必须大于 0").into());
+        }
+        if days != config.danmaku_update_policy.cold_interval_days {
+            config.danmaku_update_policy.cold_interval_days = days;
+            updated_fields.push("danmaku_update_cold_interval_days");
+        }
+    }
+
+    if let Err(err) = config.danmaku_update_policy.validate() {
+        return Err(anyhow!("弹幕增量更新策略无效：{}", err).into());
     }
 
     // 处理并发控制设置
@@ -9499,6 +9673,20 @@ pub async fn update_config_internal(
                 | "danmaku_time_offset" => {
                     manager
                         .update_config_item("danmaku_option", serde_json::to_value(&config.danmaku_option)?)
+                        .await
+                }
+                "danmaku_update_enabled"
+                | "danmaku_update_fresh_days"
+                | "danmaku_update_fresh_interval_hours"
+                | "danmaku_update_mature_days"
+                | "danmaku_update_mature_interval_days"
+                | "danmaku_update_cold_days"
+                | "danmaku_update_cold_interval_days" => {
+                    manager
+                        .update_config_item(
+                            "danmaku_update_policy",
+                            serde_json::to_value(&config.danmaku_update_policy)?,
+                        )
                         .await
                 }
                 // NFO配置字段
@@ -14729,6 +14917,10 @@ async fn update_bangumi_video_path_in_database(
             play_audio_streams: None,
             play_subtitle_streams: None,
             play_streams_updated_at: None,
+            danmaku_last_synced_at: None,
+            danmaku_sync_generation: 0,
+            danmaku_cid_snapshot: None,
+            danmaku_last_write_count: 0,
             ai_renamed: None,
         };
 
@@ -14870,6 +15062,10 @@ async fn move_bangumi_files_to_new_path(
             play_audio_streams: None,
             play_subtitle_streams: None,
             play_streams_updated_at: None,
+            danmaku_last_synced_at: None,
+            danmaku_sync_generation: 0,
+            danmaku_cid_snapshot: None,
+            danmaku_last_write_count: 0,
             ai_renamed: None,
         };
 

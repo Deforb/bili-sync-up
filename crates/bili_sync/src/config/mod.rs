@@ -20,8 +20,8 @@ pub use crate::config::global::{
 };
 use crate::config::item::ConcurrentLimit;
 pub use crate::config::item::{
-    EmptyUpperStrategy, NFOConfig, NFOTimeType, PathSafeTemplate, RateLimit, SubmissionRiskControlConfig,
-    SubmissionScanStrategyConfig,
+    DanmakuUpdatePolicy, EmptyUpperStrategy, NFOConfig, NFOTimeType, PathSafeTemplate, RateLimit,
+    SubmissionRiskControlConfig, SubmissionScanStrategyConfig,
 };
 pub(crate) use crate::config::manager::describe_config_key;
 pub use crate::config::manager::ConfigManager;
@@ -166,6 +166,8 @@ pub struct Config {
     pub filter_option: FilterOption,
     #[serde(default)]
     pub danmaku_option: DanmakuOption,
+    #[serde(default)]
+    pub danmaku_update_policy: DanmakuUpdatePolicy,
     #[serde(default = "default_video_name")]
     pub video_name: Cow<'static, str>,
     #[serde(default = "default_page_name")]
@@ -664,6 +666,7 @@ impl Clone for Config {
                 outline: self.danmaku_option.outline,
                 time_offset: self.danmaku_option.time_offset,
             },
+            danmaku_update_policy: self.danmaku_update_policy.clone(),
             video_name: self.video_name.clone(),
             page_name: self.page_name.clone(),
             multi_page_name: self.multi_page_name.clone(),
@@ -712,6 +715,7 @@ impl Default for Config {
             credential: ArcSwapOption::from(Some(Arc::new(Credential::default()))),
             filter_option: FilterOption::default(),
             danmaku_option: DanmakuOption::default(),
+            danmaku_update_policy: DanmakuUpdatePolicy::default(),
             video_name: Cow::Borrowed("{{upper_name}}/{{title}}"),
             page_name: Cow::Borrowed("{{pubtime}}-{{bvid}}-{{truncate title 20}}"),
             multi_page_name: Cow::Borrowed("P{{pid_pad}}.{{ptitle}}"),
@@ -834,6 +838,11 @@ impl Config {
         if !(self.concurrent_limit.video > 0 && self.concurrent_limit.page > 0) {
             ok = false;
             error!("video 和 page 允许的并发数必须大于 0");
+        }
+
+        if let Err(err) = self.danmaku_update_policy.validate() {
+            ok = false;
+            error!("弹幕增量更新策略无效：{}", err);
         }
 
         if critical_error {

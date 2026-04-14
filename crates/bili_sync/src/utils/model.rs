@@ -1509,6 +1509,10 @@ mod tests {
             play_audio_streams: Set(None),
             play_subtitle_streams: Set(None),
             play_streams_updated_at: Set(None),
+            danmaku_last_synced_at: Set(None),
+            danmaku_sync_generation: Set(0),
+            danmaku_cid_snapshot: Set(None),
+            danmaku_last_write_count: Set(0),
             ai_renamed: NotSet,
         }
         .insert(db)

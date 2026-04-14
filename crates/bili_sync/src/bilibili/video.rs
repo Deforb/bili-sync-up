@@ -419,7 +419,7 @@ impl<'a> Video<'a> {
         Ok(serde_json::from_value(res["data"].take())?)
     }
 
-    pub async fn get_danmaku_writer(&self, page: &'a PageInfo, token: CancellationToken) -> Result<DanmakuWriter<'a>> {
+    pub async fn get_danmaku_elements(&self, page: &'a PageInfo, token: CancellationToken) -> Result<Vec<DanmakuElem>> {
         let segment_count = page.duration.div_ceil(360);
         debug!("开始获取弹幕，共{}个分段", segment_count);
 
@@ -449,6 +449,11 @@ impl<'a> Video<'a> {
         all_danmaku.sort_by_key(|d| d.progress);
         debug!("弹幕获取完成，共{}条弹幕", all_danmaku.len());
 
+        Ok(all_danmaku)
+    }
+
+    pub async fn get_danmaku_writer(&self, page: &'a PageInfo, token: CancellationToken) -> Result<DanmakuWriter<'a>> {
+        let all_danmaku = self.get_danmaku_elements(page, token).await?;
         Ok(DanmakuWriter::new(
             page,
             all_danmaku.into_iter().map(|x| x.into()).collect(),

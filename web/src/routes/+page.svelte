@@ -14,7 +14,7 @@
 	import api from '$lib/api';
 	import { wsManager } from '$lib/ws';
 	import { runRequest } from '$lib/utils/request.js';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
 	import type {
 		DashBoardResponse,
 		SysInfo,
@@ -24,6 +24,8 @@
 	} from '$lib/types';
 	import AuthLogin from '$lib/components/auth-login.svelte';
 	import InitialSetup from '$lib/components/initial-setup.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	// 图标导入
 	import CloudDownloadIcon from '@lucide/svelte/icons/cloud-download';
@@ -88,20 +90,11 @@
 
 	// 统一按北京时间显示（24小时制）
 	function formatTime(timeStr: string | null | undefined): string {
-		if (!timeStr) return '-';
-		const formatted = formatTimestamp(timeStr, BEIJING_TIMEZONE, 'time');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return timeStr;
-		}
-		return formatted;
+		return formatTimestampOrFallback(timeStr, BEIJING_TIMEZONE, 'time', timeStr ?? '-');
 	}
 
 	function formatChartTime(v: string | number): string {
-		const formatted = formatTimestamp(v, BEIJING_TIMEZONE, 'time');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return `${v}`;
-		}
-		return formatted;
+		return formatTimestampOrFallback(v, BEIJING_TIMEZONE, 'time', `${v}`);
 	}
 
 	// 从路径提取番剧名称（备用方案，当 series_name 不可用时）
@@ -398,18 +391,13 @@
 {:else}
 	<div class="space-y-6">
 		{#if loading}
-			<div class="flex items-center justify-center py-12">
-				<div class="text-muted-foreground">加载中...</div>
-			</div>
+			<Loading />
 		{:else}
 			<!-- 第一行：存储空间 + 当前监听 -->
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				<Card class="lg:col-span-1">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示当前磁盘可用空间、总容量和已用比例"
-						>
+						<CardTitle class="text-sm font-medium" title="显示当前磁盘可用空间、总容量和已用比例">
 							存储空间
 						</CardTitle>
 						<HardDriveIcon class="text-muted-foreground h-4 w-4" />
@@ -429,7 +417,7 @@
 								</div>
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -553,7 +541,7 @@
 								</div>
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -563,10 +551,7 @@
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				<Card class="max-w-full overflow-hidden lg:col-span-2">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示近七日新增视频统计和最近入库记录"
-						>
+						<CardTitle class="text-sm font-medium" title="显示近七日新增视频统计和最近入库记录">
 							最近入库
 						</CardTitle>
 						<VideoIcon class="text-muted-foreground h-4 w-4" />
@@ -636,10 +621,7 @@
 				</Card>
 				<Card class="max-w-full md:col-span-1">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示下载与扫描任务的运行状态和控制入口"
-						>
+						<CardTitle class="text-sm font-medium" title="显示下载与扫描任务的运行状态和控制入口">
 							下载任务状态
 						</CardTitle>
 						<CloudDownloadIcon class="text-muted-foreground h-4 w-4" />
@@ -734,7 +716,7 @@
 								{/if}
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -745,10 +727,7 @@
 				<!-- 内存使用情况 -->
 				<Card class="overflow-hidden">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示系统总内存、已用内存和进程内存变化"
-						>
+						<CardTitle class="text-sm font-medium" title="显示系统总内存、已用内存和进程内存变化">
 							内存使用情况
 						</CardTitle>
 						<MemoryStickIcon class="text-muted-foreground h-4 w-4" />
@@ -823,10 +802,7 @@
 
 				<Card class="overflow-hidden">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示当前 CPU 使用率和最近一段时间的变化"
-						>
+						<CardTitle class="text-sm font-medium" title="显示当前 CPU 使用率和最近一段时间的变化">
 							CPU 使用情况
 						</CardTitle>
 						<CpuIcon class="text-muted-foreground h-4 w-4" />
@@ -924,7 +900,7 @@
 			</Dialog.Header>
 			<div class="mt-2 max-h-[60vh] space-y-2 overflow-auto">
 				{#if latestIngests.length === 0}
-					<div class="text-muted-foreground py-8 text-center text-sm">暂无入库记录</div>
+					<EmptyState title="暂无入库记录" class="border-0 bg-transparent py-8" />
 				{:else}
 					{#each latestIngests as item (item.video_id)}
 						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">

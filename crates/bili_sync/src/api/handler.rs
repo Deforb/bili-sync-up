@@ -5548,7 +5548,6 @@ pub(crate) async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrai
         }
     }
 
-    cleanup_empty_subdirs_under(&base_path);
     cleanup_empty_dir_if_empty(&base_path, base_dir_label);
 }
 

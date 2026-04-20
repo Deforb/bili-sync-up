@@ -3751,7 +3751,7 @@ pub async fn add_video_source_internal(
                         })
                         .unwrap_or_default();
                     let client = crate::bilibili::BiliClient::new(cookie);
-                    match get_collection_cover_from_api(up_id, s_id, &client).await {
+                    match get_collection_cover_from_api(up_id, s_id, collection_type, &client).await {
                         Ok(cover) => {
                             info!("成功从API获取合集「{}」封面: {}", collection_name, cover);
                             Some(cover)
@@ -16197,37 +16197,29 @@ fn extract_bangumi_season_title(full_title: &str) -> String {
 async fn get_collection_cover_from_api(
     up_id: i64,
     collection_id: i64,
+    collection_type: i32,
     client: &crate::bilibili::BiliClient,
 ) -> Result<String, anyhow::Error> {
-    // 分页获取所有合集，避免遗漏
-    let mut page = 1;
-    loop {
-        let collections_response = client.get_user_collections(up_id, page, 50).await?;
-
-        // 查找目标合集
-        for collection in &collections_response.collections {
-            if collection.sid.parse::<i64>().unwrap_or(0) == collection_id {
-                if !collection.cover.is_empty() {
-                    return Ok(collection.cover.clone());
-                } else {
-                    return Err(anyhow!("合集封面URL为空"));
-                }
-            }
-        }
-
-        // 检查是否还有更多页
-        if collections_response.collections.len() < 50 {
-            break; // 已经是最后一页
-        }
-        page += 1;
-
-        // 安全限制，避免无限循环
-        if page > 20 {
-            return Err(anyhow!("搜索合集时达到最大页数限制 (20页)"));
-        }
+    let expected_collection_type = if collection_type == 1 { "series" } else { "season" };
+    let collections_response = client
+        .get_user_collections(up_id, 1, 30)
+        .await
+        .with_context(|| format!("获取UP主 {} 的合集列表失败", up_id))?;
+    let collection = collections_response
+        .collections
+        .iter()
+        .find(|item| {
+            item.collection_type == expected_collection_type
+                && item.sid.parse::<i64>().ok() == Some(collection_id)
+        })
+        .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
+    let cover_url = collection.cover.trim();
+    if cover_url.is_empty() {
+        Err(anyhow!("合集封面URL为空"))
+    } else {
+        Ok(cover_url.to_string())
     }
-
-    Err(anyhow!("未找到合集ID {} (UP主: {})", collection_id, up_id))
+    .with_context(|| format!("获取合集 {} 封面失败 (UP主: {})", collection_id, up_id))
 }
 
 /// 处理番剧合并到现有源的逻辑

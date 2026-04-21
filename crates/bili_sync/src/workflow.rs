@@ -12118,6 +12118,7 @@ mod tests {
             audio_only: Set(false),
             audio_only_m4a_only: Set(false),
             flat_folder: Set(false),
+            folder_mode: Set(crate::utils::folder_mode::FOLDER_MODE_NORMAL),
             download_danmaku: Set(true),
             download_subtitle: Set(true),
             ai_rename: Set(false),

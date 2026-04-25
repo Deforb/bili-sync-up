@@ -34,6 +34,13 @@
 	export let selectionMode: boolean = false; // 是否为选择模式
 	export let selected: boolean = false; // 是否被选中
 	export let onSelectionChange: ((videoId: number, selected: boolean) => void) | null = null; // 选择状态变化回调
+	let coverFailed = false;
+	let lastVideoId: number | null = null;
+
+	$: if (lastVideoId !== video.id) {
+		lastVideoId = video.id;
+		coverFailed = false;
+	}
 
 	function shouldIgnoreSelectionToggle(target: EventTarget | null): boolean {
 		if (!target || !(target instanceof HTMLElement)) return false;
@@ -77,9 +84,14 @@
 	function getOverallStatus(downloadStatus: number[]): {
 		text: string;
 		color: 'default' | 'secondary' | 'destructive' | 'outline';
+		description: string;
 	} {
 		if (video.valid === false) {
-			return { text: '无效', color: 'outline' };
+			return {
+				text: '无效',
+				color: 'outline',
+				description: 'B站已返回视频失效状态，已下载的本地文件和封面会继续保留显示。'
+			};
 		}
 
 		const completed = downloadStatus.filter((status) => status === 7).length;
@@ -87,11 +99,15 @@
 		const failed = downloadStatus.filter((status) => status !== 7 && status !== 0).length;
 
 		if (completed === total) {
-			return { text: '全部完成', color: 'default' };
+			return { text: '全部完成', color: 'default', description: '所有下载任务已完成。' };
 		} else if (failed > 0) {
-			return { text: '部分失败', color: 'destructive' };
+			return {
+				text: '部分失败',
+				color: 'destructive',
+				description: '有下载任务失败，可进入详情页查看或重置。'
+			};
 		} else {
-			return { text: '进行中', color: 'secondary' };
+			return { text: '进行中', color: 'secondary', description: '仍有下载任务未完成。' };
 		}
 	}
 
@@ -247,6 +263,28 @@
 		// 使用后端代理端点
 		return `/api/proxy/image?url=${encodeURIComponent(originalUrl)}`;
 	}
+
+	function getLocalCoverUrl(videoId: number): string {
+		return `/api/videos/${videoId}/cover`;
+	}
+
+	function getInitialCoverUrl(video: VideoInfo): string {
+		if (video.valid === false) {
+			return getLocalCoverUrl(video.id);
+		}
+		return video.cover ? getProxiedImageUrl(video.cover) : getLocalCoverUrl(video.id);
+	}
+
+	function handleCoverImageError(event: Event) {
+		const target = event.currentTarget as HTMLImageElement;
+		if (video.valid !== false && video.cover && target.dataset.coverFallback !== 'local') {
+			target.dataset.coverFallback = 'local';
+			target.src = getLocalCoverUrl(video.id);
+			return;
+		}
+
+		coverFailed = true;
+	}
 </script>
 
 <Card
@@ -258,30 +296,23 @@
 	onkeydown={handleCardKeydown}
 >
 	<!-- 整个卡片的背景模糊图片 -->
-	{#if video.cover && mode === 'default'}
+	{#if mode === 'default' && !coverFailed}
 		<div
 			class="absolute inset-0 scale-110 bg-cover bg-center opacity-20 blur-[2px]"
-			style="background-image: url('{getProxiedImageUrl(video.cover)}')"
+			style="background-image: url('{getInitialCoverUrl(video)}')"
 		></div>
 	{/if}
 
 	<!-- 封面图片 -->
-	{#if video.cover && mode === 'default'}
+	{#if mode === 'default' && !coverFailed}
 		<div class="relative z-10 overflow-hidden rounded-t-lg">
 			<!-- 前景清晰图片 -->
 			<img
-				src={getProxiedImageUrl(video.cover)}
+				src={getInitialCoverUrl(video)}
 				alt={displayTitle}
 				class="aspect-[4/3] w-full object-cover transition-transform duration-200 group-hover:scale-105"
 				loading="lazy"
-				on:error={(e) => {
-					// 封面加载失败时隐藏整个封面容器
-					const target = e.currentTarget as HTMLImageElement;
-					const container = target.closest('.relative') as HTMLElement;
-					if (container) {
-						container.style.display = 'none';
-					}
-				}}
+				on:error={handleCoverImageError}
 			/>
 			<!-- 选择模式复选框覆盖在封面左上角 -->
 			{#if selectionMode}
@@ -309,9 +340,20 @@
 
 			<!-- 状态徽章覆盖在封面上 -->
 			<div class="absolute top-2 right-2 z-20">
-				<Badge variant={overallStatus.color} class="shrink-0 text-xs shadow-md">
-					{overallStatus.text}
-				</Badge>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						<Badge
+							variant={overallStatus.color}
+							class="cursor-help text-xs shadow-md"
+							title={overallStatus.description}
+						>
+							{overallStatus.text}
+						</Badge>
+					</Tooltip.Trigger>
+					<Tooltip.Content>
+						<p>{overallStatus.description}</p>
+					</Tooltip.Content>
+				</Tooltip.Root>
 			</div>
 		</div>
 	{/if}
@@ -319,7 +361,7 @@
 	<CardHeader class="{mode === 'default' ? 'flex-shrink-0 pb-3' : 'pb-3'} relative z-10">
 		<div class="flex min-w-0 items-start justify-between gap-2">
 			<!-- 选择模式复选框（无封面时显示） -->
-			{#if selectionMode && (!video.cover || mode !== 'default')}
+			{#if selectionMode && (coverFailed || mode !== 'default')}
 				<input
 					type="checkbox"
 					checked={selected}
@@ -328,7 +370,7 @@
 					class="mt-0.5 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0"
 				/>
 			{/if}
-			{#if (!video.cover || mode !== 'default') && video.is_charge_video}
+			{#if (coverFailed || mode !== 'default') && video.is_charge_video}
 				<Badge
 					class="mt-0.5 shrink-0 bg-amber-500 text-xs text-white hover:bg-amber-500"
 					title="充电专属视频，播放前需先为 UP 主充电"
@@ -355,10 +397,21 @@
 					<div class="text-primary line-clamp-2 leading-tight font-medium">{displayTitle}</div>
 				{/if}
 			</CardTitle>
-			{#if !video.cover || mode !== 'default'}
-				<Badge variant={overallStatus.color} class="shrink-0 text-xs">
-					{overallStatus.text}
-				</Badge>
+			{#if coverFailed || mode !== 'default'}
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						<Badge
+							variant={overallStatus.color}
+							class="cursor-help text-xs"
+							title={overallStatus.description}
+						>
+							{overallStatus.text}
+						</Badge>
+					</Tooltip.Trigger>
+					<Tooltip.Content>
+						<p>{overallStatus.description}</p>
+					</Tooltip.Content>
+				</Tooltip.Root>
 			{/if}
 		</div>
 		{#if displaySubtitle}

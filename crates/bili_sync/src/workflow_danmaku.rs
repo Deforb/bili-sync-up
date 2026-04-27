@@ -441,63 +441,7 @@ fn reset_video_for_page_redownload(status: u32) -> u32 {
     cleared & !(1 << 31)
 }
 
-async fn refresh_video_pages(
-    bili_client: &BiliClient,
-    connection: &DatabaseConnection,
-    config: &Config,
-    video_model: &video::Model,
-    selected: Vec<(page::Model, Option<Stage>)>,
-    now: DateTime<Utc>,
-) -> Result<usize> {
-    let bili_video = Video::new(bili_client, video_model.bvid.clone());
-    let selected_pages = selected
-        .iter()
-        .map(|(page_model, _)| page_model.clone())
-        .collect::<Vec<_>>();
-    let fresh_pages = load_fresh_pages_or_fallback(
-        &bili_video,
-        video_model,
-        &selected_pages,
-        &format!("刷新视频 {} 时获取 view_info 失败", video_model.bvid),
-    )
-    .await?;
-
-    let mut success = 0usize;
-    for (db_page, next_stage) in selected {
-        let fresh = fresh_pages.iter().find(|page_info| page_info.page == db_page.pid);
-        let Some(fresh) = fresh else {
-            warn!(
-                "视频「{}」({}) 的分页 pid={} 在最新 view_info 中不存在，跳过",
-                video_model.name, video_model.bvid, db_page.pid
-            );
-            continue;
-        };
-
-        if let Err(err) = refresh_one_page(
-            &bili_video,
-            connection,
-            config,
-            video_model,
-            db_page,
-            fresh,
-            next_stage,
-            now,
-        )
-        .await
-        {
-            error!(
-                "刷新视频「{}」({}) 分页 pid={} 弹幕失败：{:#}",
-                video_model.name, video_model.bvid, fresh.page, err
-            );
-            continue;
-        }
-        success += 1;
-    }
-
-    Ok(success)
-}
-
-async fn refresh_one_page(
+pub async fn sync_page_danmaku(
     bili_video: &Video<'_>,
     config: &Config,
     video_model: &video::Model,

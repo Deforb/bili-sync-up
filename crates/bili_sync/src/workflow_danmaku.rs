@@ -306,7 +306,12 @@ async fn load_candidate_videos(connection: &DatabaseConnection) -> Result<Vec<(v
     }
 
     video::Entity::find()
-        .filter(Condition::all().add(video::Column::Valid.eq(true)).add(source_filter))
+        .filter(
+            Condition::all()
+                .add(video::Column::Valid.eq(true))
+                .add(video::Column::Deleted.eq(0))
+                .add(source_filter),
+        )
         .find_with_related(page::Entity)
         .all(connection)
         .await
@@ -331,6 +336,11 @@ async fn load_candidate_videos(connection: &DatabaseConnection) -> Result<Vec<(v
 fn danmaku_subtask_completed(status: u32) -> bool {
     let slot = (status >> (DANMAKU_STATUS_OFFSET * 3)) & 0b111;
     slot == STATUS_OK
+}
+
+#[cfg(test)]
+fn video_can_participate_in_danmaku_refresh(video_model: &video::Model) -> bool {
+    video_model.valid && video_model.deleted == 0
 }
 
 fn reset_non_danmaku_subtasks(status: u32) -> u32 {
@@ -689,6 +699,17 @@ fn parse_stored_datetime(value: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_video_is_not_eligible_for_danmaku_refresh() {
+        let video_model = video::Model {
+            valid: true,
+            deleted: 1,
+            ..Default::default()
+        };
+
+        assert!(!video_can_participate_in_danmaku_refresh(&video_model));
+    }
 
     #[test]
     fn danmaku_completed_detects_ok() {

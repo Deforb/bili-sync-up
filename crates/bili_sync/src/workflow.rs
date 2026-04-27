@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bili_sync_entity::*;
-use chrono::Datelike;
+use chrono::{Datelike, Utc};
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, TryStreamExt};
 use sea_orm::entity::prelude::*;
@@ -101,6 +101,34 @@ fn get_submission_upper_intro_load_lock(upper_id: i64) -> Arc<TokioMutex<()>> {
         .entry(upper_id)
         .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
+}
+
+async fn fetch_collection_cover_url(
+    bili_client: &crate::bilibili::BiliClient,
+    up_mid: i64,
+    collection_sid: i64,
+    collection_type: i32,
+) -> Result<String> {
+    let expected_collection_type = if collection_type == 1 { "series" } else { "season" };
+    let collections_response = bili_client
+        .get_user_collections(up_mid, 1, 30)
+        .await
+        .with_context(|| format!("获取合集列表失败: up_mid={}", up_mid))?;
+    let collection = collections_response
+        .collections
+        .iter()
+        .find(|item| {
+            item.collection_type == expected_collection_type
+                && item.sid.parse::<i64>().ok() == Some(collection_sid)
+        })
+        .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
+    let cover_url = collection.cover.trim();
+    if cover_url.is_empty() {
+        Err(anyhow!("合集封面URL为空"))
+    } else {
+        Ok(cover_url.to_string())
+    }
+    .with_context(|| format!("从合集列表获取封面失败: sid={}, up_mid={}", collection_sid, up_mid))
 }
 
 fn get_root_alias_asset_write_lock(root_dir: &Path) -> Arc<TokioMutex<()>> {
@@ -296,7 +324,22 @@ fn is_bili_request_failed_with_codes(err: &anyhow::Error, codes: &[i64]) -> bool
 }
 
 fn is_bili_request_failed_inaccessible(err: &anyhow::Error) -> bool {
-    is_bili_request_failed_with_codes(err, &[-404, 62002])
+    is_bili_request_failed_with_codes(err, &[-404, 62002, 62012])
+}
+
+fn first_inaccessible_page_error(results: &[Result<ExecutionStatus>; 5]) -> Option<&anyhow::Error> {
+    results
+        .iter()
+        .filter_map(|res| res.as_ref().err())
+        .find(|err| is_bili_request_failed_inaccessible(err))
+}
+
+fn inaccessible_reason_from_error(err: &anyhow::Error) -> &'static str {
+    if is_bili_request_failed_with_codes(err, &[62002, 62012]) {
+        "稿件不可见或仅自己可见"
+    } else {
+        "已在B站删除/不可访问"
+    }
 }
 
 fn is_database_locked_error(err: &anyhow::Error) -> bool {
@@ -804,6 +847,24 @@ pub async fn process_video_source(
         info!("任务已暂停/取消，跳过详情与下载阶段");
         return Ok((new_video_count, new_videos));
     }
+
+    if video_source.download_danmaku() && !(video_source.audio_only() && video_source.audio_only_m4a_only()) {
+        if let Err(err) = crate::workflow_danmaku::schedule_incremental_danmaku_for_source(
+            connection,
+            video_source.filter_expr(),
+            &crate::config::reload_config(),
+        )
+        .await
+        {
+            warn!(
+                "{}「{}」准备弹幕增量状态失败，将继续执行常规下载流程: {:#}",
+                video_source.source_type_display(),
+                video_source.source_name_display(),
+                err
+            );
+        }
+    }
+
     if new_video_count == 0 {
         let has_unfilled = !filter_unfilled_videos(video_source.filter_expr(), connection)
             .await?
@@ -1674,7 +1735,7 @@ pub async fn fetch_video_details(
                                 &video_model.bvid, &video_model.name, e
                             );
                             if is_bili_request_failed_inaccessible(&e) {
-                                // 404 / 62002：视频已被删除、不可访问或稿件不可见
+                                // -404 / 62002 / 62012：视频已被删除、不可访问、稿件不可见或仅自己可见
                                 // 若这是“重置详情”导致的回填（数据库里已有 page.path），则需要：
                                 // - 跳过本次重置
                                 // - 恢复为未重置（把状态置为完成，避免每轮都重复尝试）
@@ -1682,9 +1743,10 @@ pub async fn fetch_video_details(
                                 use sea_orm::sea_query::Expr;
                                 use sea_orm::{Set, Unchanged};
 
-                                let is_invisible = is_bili_request_failed_with_codes(&e, &[62002]);
+                                let is_invisible =
+                                    is_bili_request_failed_with_codes(&e, &[62002, 62012]);
                                 let inaccessible_reason = if is_invisible {
-                                    "稿件不可见"
+                                    "稿件不可见或仅自己可见"
                                 } else {
                                     "已在B站删除/不可访问"
                                 };
@@ -3751,7 +3813,7 @@ pub async fn download_video_pages(
     };
     let path_changed = !path_to_save.is_empty() && final_video_model.path != path_to_save;
 
-    // 为多P视频生成基于视频名称的文件名
+    // 为多P视频生成目录级 sidecar 文件名前缀
     let video_base_name = if !is_single_page {
         // 多P视频启用Season结构时，使用视频根目录的文件夹名作为系列级封面的文件名
         let config = crate::config::reload_config();
@@ -3786,9 +3848,24 @@ pub async fn download_video_pages(
                 final_video_model.name.clone() // 回退到视频标题
             }
         } else {
-            // 不使用Season结构时，使用模板渲染
-            crate::config::with_config(|bundle| bundle.render_video_template(&video_format_args(&final_video_model)))
-                .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?
+            // 不使用Season结构时，sidecar 文件名前缀只取最终目录的末级名称，
+            // 避免视频目录模板包含子路径时再次拼接出嵌套目录。
+            let rendered_video_base_name = crate::config::with_config(|bundle| {
+                bundle.render_video_template(&video_format_args(&final_video_model))
+            })
+            .map_err(|e| anyhow::anyhow!("模板渲染失败: {}", e))?;
+            let resolved_video_base_name = resolve_sidecar_base_name(
+                &base_path,
+                Some(&rendered_video_base_name),
+                &final_video_model.name,
+            );
+            if resolved_video_base_name != rendered_video_base_name {
+                debug!(
+                    "多P sidecar 文件名前缀改用目录末级名称，避免嵌套目录: rendered='{}', resolved='{}'",
+                    rendered_video_base_name, resolved_video_base_name
+                );
+            }
+            resolved_video_base_name
         }
     } else if is_collection {
         // 合集中的单页视频：检查是否启用Season结构
@@ -3995,34 +4072,32 @@ pub async fn download_video_pages(
         true // 番剧不在此处检查
     };
 
+    let multi_page_use_season_nfo_route =
+        !is_single_page && season_folder.is_some() && crate::config::reload_config().multi_page_use_season_structure;
+    let submission_up_seasonal_nfo_route = matches!(video_source, VideoSourceEnum::Submission(_))
+        && !is_submission_collection_video
+        && !is_single_page
+        && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal";
+    let collection_like_nfo_route = (is_collection && collection_use_season_structure)
+        || submission_up_seasonal_nfo_route
+        || multi_page_use_season_nfo_route;
+
     // 合集/多P Season结构下，若目录级元数据缺失，允许本轮任意分集补齐。
-    let should_backfill_collection_root_assets = if !disable_tvshow_assets
-        && season_folder.is_some()
-        && ((is_collection && collection_use_season_structure)
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
-    {
-        let root_dir = base_path.parent().unwrap_or(&base_path);
-        !root_dir.join("tvshow.nfo").exists()
-            || !root_dir.join("poster.jpg").exists()
-            || !root_dir.join("folder.jpg").exists()
-    } else {
-        false
-    };
-    let should_backfill_collection_season_nfo = if !disable_tvshow_assets
-        && season_folder.is_some()
-        && ((is_collection && collection_use_season_structure)
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal"))
-    {
-        !base_path.join("season.nfo").exists()
-    } else {
-        false
-    };
+    let should_backfill_collection_root_assets =
+        if !disable_tvshow_assets && season_folder.is_some() && collection_like_nfo_route {
+            let root_dir = base_path.parent().unwrap_or(&base_path);
+            !root_dir.join("tvshow.nfo").exists()
+                || !root_dir.join("poster.jpg").exists()
+                || !root_dir.join("folder.jpg").exists()
+        } else {
+            false
+        };
+    let should_backfill_collection_season_nfo =
+        if !disable_tvshow_assets && season_folder.is_some() && collection_like_nfo_route {
+            !base_path.join("season.nfo").exists()
+        } else {
+            false
+        };
 
     // 先处理NFO生成（独立执行，避免tokio::join!类型问题）
     let nfo_result = if is_bangumi && season_info.is_some() {
@@ -4041,12 +4116,7 @@ pub async fn download_video_pages(
         let should_generate_nfo = if is_bangumi {
             // 番剧：只有在文件不存在时才生成，放在番剧文件夹根目录
             separate_status[2] && bangumi_folder_path.is_some() && should_download_bangumi_nfo
-        } else if is_collection
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal")
-        {
+        } else if is_collection || submission_up_seasonal_nfo_route {
             // 合集：只有第一个视频时生成tvshow.nfo
             if !disable_tvshow_assets && separate_status[2] && collection_use_season_structure {
                 // 检查是否为第一个视频
@@ -4083,16 +4153,13 @@ pub async fn download_video_pages(
             separate_status[2] && !is_single_page && !disable_tvshow_assets
         };
 
-        let is_collection_like_nfo_target = is_collection
-            || (matches!(video_source, VideoSourceEnum::Submission(_))
-                && !is_submission_collection_video
-                && !is_single_page
-                && crate::config::reload_config().collection_folder_mode.as_ref() == "up_seasonal");
-        let should_generate_collection_tvshow_nfo = should_generate_nfo && is_collection_like_nfo_target;
-        let should_generate_collection_season_nfo = is_collection_like_nfo_target
+        let should_generate_collection_tvshow_nfo = should_generate_nfo && collection_like_nfo_route;
+        let should_generate_collection_season_nfo = collection_like_nfo_route
             && !disable_tvshow_assets
             && separate_status[2]
-            && collection_use_season_structure
+            && ((is_collection && collection_use_season_structure)
+                || submission_up_seasonal_nfo_route
+                || multi_page_use_season_nfo_route)
             && season_folder.is_some();
 
         if should_generate_collection_tvshow_nfo || should_generate_collection_season_nfo {
@@ -4194,10 +4261,28 @@ pub async fn download_video_pages(
                         .or_else(|| name.clone());
                     (name, season_name, None, None)
                 }
+                _ if multi_page_use_season_nfo_route => {
+                    let root_name = base_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|s| s.to_string_lossy().to_string())
+                        .filter(|s| !s.trim().is_empty());
+                    let name = root_name
+                        .clone()
+                        .or_else(|| Some(final_video_model.name.clone()).filter(|s| !s.trim().is_empty()));
+                    let season_name = Some(final_video_model.name.clone())
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| name.clone());
+                    (name, season_name, None, None)
+                }
                 _ => (None, None, None, None),
             };
 
-            let upper_intro = get_submission_upper_intro(bili_client, final_video_model.upper_id, token.clone()).await;
+            let tvshow_intro = if multi_page_use_season_nfo_route {
+                Some(final_video_model.intro.clone()).filter(|s| !s.trim().is_empty())
+            } else {
+                get_submission_upper_intro(bili_client, final_video_model.upper_id, token.clone()).await
+            };
 
             let current_nfo_season_number = season_folder
                 .as_deref()
@@ -4229,6 +4314,14 @@ pub async fn download_video_pages(
                                 season_total_episodes: 1,
                             }
                         }
+                    }
+                }
+                _ if multi_page_use_season_nfo_route => {
+                    let total_episodes = i32::try_from(pages.len()).unwrap_or(1).max(1);
+                    CollectionNfoStats {
+                        total_seasons: 1,
+                        total_episodes,
+                        season_total_episodes: total_episodes,
                     }
                 }
                 _ => match get_collection_nfo_stats(connection, video_source, &final_video_model).await {
@@ -4302,7 +4395,7 @@ pub async fn download_video_pages(
                 collection_name.as_deref(),
                 season_collection_name.as_deref(),
                 collection_cover.as_deref(),
-                upper_intro.as_deref(),
+                tvshow_intro.as_deref(),
                 collection_plot_link_override.as_deref(),
                 collection_uniqueid_override.as_deref(),
                 season_lists_link_override.as_deref(),
@@ -4413,39 +4506,25 @@ pub async fn download_video_pages(
                             info!("合集「{}」使用数据库保存的封面: {}", fresh_collection.name, cover_url);
                             Some(cover_url.clone())
                         }
-                        _ => match bili_client.get_user_collections(fresh_collection.m_id, 1, 50).await {
-                            Ok(collections_response) => {
-                                let fetched_cover = collections_response
-                                    .collections
-                                    .iter()
-                                    .find(|item| item.sid.parse::<i64>().ok() == Some(fresh_collection.s_id))
-                                    .and_then(|item| {
-                                        let cover = item.cover.trim();
-                                        if cover.is_empty() {
-                                            None
-                                        } else {
-                                            Some(cover.to_string())
-                                        }
-                                    });
-
-                                if let Some(ref cover_url) = fetched_cover {
-                                    info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
-                                    let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
-                                    active_model.cover = Set(Some(cover_url.clone()));
-                                    if let Err(err) = active_model.update(connection).await {
-                                        warn!(
-                                                "回写合集封面到数据库失败（将继续使用本次结果）: collection_id={}, sid={}, err={}",
-                                                collection_source.id, collection_source.s_id, err
-                                            );
-                                    }
-                                } else {
-                                    info!(
-                                            "合集「{}」数据库和API中都没有稳定封面；若由非首集补封面，将不再回退为当前分集封面",
-                                            fresh_collection.name
+                        _ => match fetch_collection_cover_url(
+                            bili_client,
+                            fresh_collection.m_id,
+                            fresh_collection.s_id,
+                            fresh_collection.r#type,
+                        )
+                        .await
+                        {
+                            Ok(cover_url) => {
+                                info!("合集「{}」运行时回查封面成功: {}", fresh_collection.name, cover_url);
+                                let mut active_model: collection::ActiveModel = fresh_collection.clone().into();
+                                active_model.cover = Set(Some(cover_url.clone()));
+                                if let Err(err) = active_model.update(connection).await {
+                                    warn!(
+                                            "回写合集封面到数据库失败（将继续使用本次结果）: collection_id={}, sid={}, err={}",
+                                            collection_source.id, collection_source.s_id, err
                                         );
                                 }
-
-                                fetched_cover
+                                Some(cover_url)
                             }
                             Err(err) => {
                                 warn!(
@@ -6459,10 +6538,14 @@ async fn download_page(
         },
         collection_page_episode_number.or(submission_page_episode_number),
     ));
+    let danmaku_config = crate::config::reload_config();
     let res_4_fut = Box::pin(fetch_page_danmaku(
         separate_status[3],
         bili_client,
         video_model,
+        &page_model,
+        connection,
+        &danmaku_config,
         &page_info,
         danmaku_path,
         token.clone(),
@@ -6488,10 +6571,39 @@ async fn download_page(
         Err(err) => (Err(err), None, None, None),
     };
 
-    let results = [res_1, res_2, res_3, res_4, res_5]
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<_>>();
+    let (res_4, danmaku_sync_update) = match res_4 {
+        Ok(danmaku_result) => (Ok(danmaku_result.status), danmaku_result.sync_update),
+        Err(err) => (Err(err), None),
+    };
+
+    let raw_results = [res_1, res_2, res_3, res_4, res_5];
+    let inaccessible_reason = first_inaccessible_page_error(&raw_results).map(inaccessible_reason_from_error);
+    let mut results = raw_results.into_iter().map(Into::into).collect::<Vec<_>>();
+
+    if let Some(inaccessible_reason) = inaccessible_reason {
+        use sea_orm::{Set, Unchanged};
+
+        info!(
+            "视频「{}」第 {} 页{}，已标记为无效并跳过后续处理",
+            &video_model.name, page_model.pid, inaccessible_reason
+        );
+
+        video::Entity::update(video::ActiveModel {
+            id: Unchanged(video_model.id),
+            valid: Set(false),
+            ..Default::default()
+        })
+        .exec(connection)
+        .await?;
+
+        status = PageStatus::from([STATUS_OK; 5]);
+        for (idx, should_run) in separate_status.iter().enumerate() {
+            if *should_run {
+                results[idx] = ExecutionStatus::Skipped;
+            }
+        }
+    }
+
     status.update_status(&results);
 
     // 充电视频在获取详情时已经被upower字段检测并处理，无需分页级别的后期检测
@@ -6783,16 +6895,27 @@ async fn download_page(
     let final_video_path = video_path.clone();
 
     let final_video_path_str = final_video_path.to_string_lossy().to_string();
-    if page_model.path.as_deref() != Some(final_video_path_str.as_str()) {
+    let final_page_path = if inaccessible_reason.is_some() {
+        original_page_model
+            .path
+            .clone()
+            .or_else(|| final_video_path.exists().then_some(final_video_path_str.clone()))
+    } else {
+        Some(final_video_path_str.clone())
+    };
+    if page_model.path.as_deref() != final_page_path.as_deref() {
         debug!(
-            "分页路径已更新并将写入数据库: page_id={}, old={:?}, new={}",
-            page_model.id, page_model.path, final_video_path_str
+            "分页路径已更新并将写入数据库: page_id={}, old={:?}, new={:?}",
+            page_model.id, page_model.path, final_page_path
         );
     }
 
     let mut page_active_model: page::ActiveModel = page_model.into();
     page_active_model.download_status = Set(status.into());
-    page_active_model.path = Set(Some(final_video_path_str));
+    page_active_model.path = Set(final_page_path);
+    if let Some(sync_update) = danmaku_sync_update.as_ref() {
+        sync_update.apply_to_active_model(&mut page_active_model);
+    }
     if let Some(file_size_bytes) = page_file_size_bytes {
         page_active_model.file_size_bytes = Set(Some(file_size_bytes));
     }
@@ -7643,18 +7766,29 @@ async fn fetch_page_video(
     })
 }
 
+pub struct PageDanmakuFetchResult {
+    pub status: ExecutionStatus,
+    pub sync_update: Option<crate::workflow_danmaku::PageDanmakuSyncUpdate>,
+}
+
 pub async fn fetch_page_danmaku(
     should_run: bool,
     bili_client: &BiliClient,
     video_model: &video::Model,
+    page_model: &page::Model,
+    _connection: &DatabaseConnection,
+    config: &crate::config::Config,
     page_info: &PageInfo,
     danmaku_path: PathBuf,
     token: CancellationToken,
-) -> Result<ExecutionStatus> {
+) -> Result<PageDanmakuFetchResult> {
     const SIDECAR_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     if !should_run {
-        return Ok(ExecutionStatus::Skipped);
+        return Ok(PageDanmakuFetchResult {
+            status: ExecutionStatus::Skipped,
+            sync_update: None,
+        });
     }
 
     // 检查 CID 是否有效（-1 表示信息获取失败）
@@ -7663,7 +7797,10 @@ pub async fn fetch_page_danmaku(
             "视频 {} 的 CID 无效（{}），跳过弹幕下载",
             &video_model.name, page_info.cid
         );
-        return Ok(ExecutionStatus::Ignored(anyhow::anyhow!("CID 无效，无法下载弹幕")));
+        return Ok(PageDanmakuFetchResult {
+            status: ExecutionStatus::Ignored(anyhow::anyhow!("CID 无效，无法下载弹幕")),
+            sync_update: None,
+        });
     }
 
     // 检查是否为番剧，如果是番剧则需要从API获取正确的 aid
@@ -7693,12 +7830,22 @@ pub async fn fetch_page_danmaku(
         Video::new(bili_client, video_model.bvid.clone())
     };
 
-    let danmaku_writer = tokio::select! {
+    let sync_update = tokio::select! {
         biased;
         _ = token.cancelled() => return Err(anyhow!("Download cancelled")),
         res = tokio::time::timeout(
             SIDECAR_REQUEST_TIMEOUT,
-            bili_video.get_danmaku_writer(page_info, token.clone()),
+            crate::workflow_danmaku::sync_page_danmaku(
+                &bili_video,
+                config,
+                video_model,
+                page_model,
+                page_info,
+                &danmaku_path,
+                None,
+                Utc::now(),
+                token.clone(),
+            ),
         ) => match res {
             Ok(inner) => inner?,
             Err(_) => {
@@ -7711,18 +7858,10 @@ pub async fn fetch_page_danmaku(
             }
         },
     };
-
-    tokio::time::timeout(SIDECAR_REQUEST_TIMEOUT, danmaku_writer.write(danmaku_path))
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "弹幕写入超时（{} 秒）: 视频「{}」第 {} 页",
-                SIDECAR_REQUEST_TIMEOUT.as_secs(),
-                video_model.name,
-                page_info.page
-            )
-        })??;
-    Ok(ExecutionStatus::Succeeded)
+    Ok(PageDanmakuFetchResult {
+        status: ExecutionStatus::Succeeded,
+        sync_update: Some(sync_update),
+    })
 }
 
 pub async fn fetch_page_subtitle(
@@ -11983,6 +12122,29 @@ fn is_same_video_folder(folder_path: &std::path::Path, video_model: &video::Mode
     false
 }
 
+fn resolve_sidecar_base_name(
+    base_path: &std::path::Path,
+    rendered_name: Option<&str>,
+    fallback_title: &str,
+) -> String {
+    let from_base_path = base_path.file_name().and_then(|name| {
+        let value = name.to_string_lossy().trim().to_string();
+        (!value.is_empty()).then_some(value)
+    });
+
+    let from_rendered_name = rendered_name.and_then(|name| {
+        name.rsplit(|c| c == '/' || c == '\\').find_map(|segment| {
+            let value = segment.trim();
+            (!value.is_empty()).then_some(value.to_string())
+        })
+    });
+
+    from_base_path
+        .or(from_rendered_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| fallback_title.to_string())
+}
+
 /// 生成唯一的文件夹名称，避免同名冲突（增强版）
 pub fn generate_unique_folder_name(
     parent_dir: &std::path::Path,
@@ -12257,17 +12419,56 @@ mod tests {
     }
 
     #[test]
-    fn test_is_bili_request_failed_inaccessible_matches_404_and_62002() {
+    fn test_is_bili_request_failed_inaccessible_matches_deleted_and_invisible_codes() {
         let deleted_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-404, "not found".to_string()));
         let invisible_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
             62002,
             "稿件不可见".to_string()
         ));
+        let self_only_err = anyhow!(crate::bilibili::BiliError::RequestFailed(
+            62012,
+            "62012".to_string()
+        ));
         let other_err = anyhow!(crate::bilibili::BiliError::RequestFailed(-352, "风控".to_string()));
 
         assert!(is_bili_request_failed_inaccessible(&deleted_err));
         assert!(is_bili_request_failed_inaccessible(&invisible_err));
+        assert!(is_bili_request_failed_inaccessible(&self_only_err));
         assert!(!is_bili_request_failed_inaccessible(&other_err));
+    }
+
+    #[test]
+    fn test_first_inaccessible_page_error_extracts_62012_reason() {
+        let results = [
+            Ok(ExecutionStatus::Succeeded),
+            Err(anyhow!(crate::bilibili::BiliError::RequestFailed(
+                62012,
+                "62012".to_string()
+            ))),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+        ];
+
+        let err = first_inaccessible_page_error(&results).expect("应识别到 62012 不可访问错误");
+        assert_eq!(inaccessible_reason_from_error(err), "稿件不可见或仅自己可见");
+    }
+
+    #[test]
+    fn test_first_inaccessible_page_error_extracts_404_reason() {
+        let results = [
+            Err(anyhow!(crate::bilibili::BiliError::RequestFailed(
+                -404,
+                "not found".to_string()
+            ))),
+            Ok(ExecutionStatus::Succeeded),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+            Ok(ExecutionStatus::Skipped),
+        ];
+
+        let err = first_inaccessible_page_error(&results).expect("应识别到 -404 不可访问错误");
+        assert_eq!(inaccessible_reason_from_error(err), "已在B站删除/不可访问");
     }
 
     #[test]
@@ -12438,6 +12639,100 @@ mod tests {
 
         let total = merge_video_total_file_size_bytes(&[first_page, second_page], &[]);
         assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_resolve_sidecar_base_name_uses_final_folder_name_for_nested_template() {
+        let base_path = PathBuf::from("まん酱").join("BV1us411z7wA");
+        let resolved = resolve_sidecar_base_name(
+            &base_path,
+            Some("まん酱/BV1us411z7wA"),
+            "【完整版MV】柯南ED50",
+        );
+
+        assert_eq!(resolved, "BV1us411z7wA");
+    }
+
+    #[test]
+    fn test_resolve_sidecar_base_name_falls_back_to_rendered_leaf_when_base_path_missing() {
+        let resolved = resolve_sidecar_base_name(
+            std::path::Path::new(""),
+            Some("まん酱/BV1us411z7wA"),
+            "【完整版MV】柯南ED50",
+        );
+
+        assert_eq!(resolved, "BV1us411z7wA");
+    }
+
+    #[tokio::test]
+    async fn test_multi_page_season_structure_tvshow_nfo_uses_video_intro() {
+        let dir = unique_temp_dir("multi-page-season-nfo");
+        fs::create_dir_all(&dir).expect("应能创建临时目录");
+
+        let video = video::Model {
+            name: "测试多P视频".to_string(),
+            intro: "测试简介".to_string(),
+            upper_id: 123456,
+            upper_name: "测试UP".to_string(),
+            bvid: "BV1MultiPageSeason".to_string(),
+            category: 1,
+            season_number: Some(1),
+            favtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 20)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            pubtime: chrono::NaiveDate::from_ymd_opt(2026, 4, 20)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            ..Default::default()
+        };
+
+        let tvshow_path = dir.join("tvshow.nfo");
+        let season_path = dir.join("Season 01").join("season.nfo");
+
+        let status = generate_collection_video_nfo(
+            true,
+            true,
+            true,
+            &video,
+            Some("多P系列根目录"),
+            Some("测试多P视频"),
+            None,
+            Some("测试简介"),
+            None,
+            None,
+            None,
+            None,
+            tvshow_path.clone(),
+            1,
+            Some(1),
+            Some(3),
+            Some(3),
+            Some(season_path.clone()),
+        )
+        .await
+        .expect("生成多P Season 结构 NFO不应失败");
+
+        assert!(matches!(status, ExecutionStatus::Succeeded), "生成状态应为 Succeeded");
+        assert!(tvshow_path.exists(), "应生成根目录 tvshow.nfo");
+        assert!(season_path.exists(), "应生成 Season 目录 season.nfo");
+
+        let tvshow_nfo = fs::read_to_string(&tvshow_path).expect("应能读取生成的 tvshow.nfo");
+        assert!(
+            tvshow_nfo.contains("测试简介"),
+            "多P Season 结构 tvshow.nfo 应写入当前视频简介"
+        );
+        assert!(
+            !tvshow_nfo.contains("这是UP主简介"),
+            "多P Season 结构 tvshow.nfo 不应写入UP简介"
+        );
+
+        let season_nfo = fs::read_to_string(&season_path).expect("应能读取生成的 season.nfo");
+        assert!(
+            season_nfo.contains("<title>测试多P视频</title>"),
+            "多P Season 结构 season.nfo 应使用视频标题"
+        );
     }
 
     // 旧的87007/87008错误检测测试已清理，现在使用革命性的upower字段检测

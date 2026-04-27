@@ -33,6 +33,7 @@
 	import { IsMobile, IsTablet } from '$lib/hooks/is-mobile.svelte.js';
 	// import type { Theme } from '$lib/stores/theme'; // 未使用，已注释
 	import ThemeToggle from '$lib/components/theme-toggle.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	let config: ConfigResponse | null = null;
 	let loading = false;
@@ -143,6 +144,69 @@
 		return settingTooltips[id as keyof typeof settingTooltips] ?? '';
 	}
 
+	const DEFAULT_CONFIG_VALUES = {
+		interval: 1200,
+		nfoIncludeGenre: true,
+		bindAddress: '0.0.0.0:12345',
+		parallelDownloadThreads: 4,
+		codecs: ['AVC', 'HEV', 'AV1'],
+		danmakuDuration: 15.0,
+		danmakuFontSize: 25,
+		danmakuWidthRatio: 1.2,
+		danmakuHorizontalGap: 20.0,
+		danmakuLaneSize: 32,
+		danmakuFloatPercentage: 0.5,
+		danmakuBottomPercentage: 0.3,
+		danmakuOpacity: 76,
+		danmakuOutline: 0.8,
+		danmakuTimeOffset: 0.0,
+		danmakuUpdateFreshDays: 3,
+		danmakuUpdateFreshIntervalHours: 6,
+		danmakuUpdateMatureDays: 30,
+		danmakuUpdateMatureIntervalDays: 3,
+		danmakuUpdateColdDays: 180,
+		danmakuUpdateColdIntervalDays: 30,
+		concurrentVideo: 3,
+		concurrentPage: 2,
+		rateLimit: 4,
+		rateDuration: 250,
+		largeSubmissionThreshold: 80,
+		baseRequestDelay: 1000,
+		largeSubmissionDelayMultiplier: 2,
+		maxDelayMultiplier: 4,
+		batchSize: 3,
+		batchDelaySeconds: 2,
+		autoBackoffBaseSeconds: 10,
+		autoBackoffMaxMultiplier: 5,
+		sourceDelaySeconds: 2,
+		submissionSourceDelaySeconds: 5,
+		dynamicApiDelayMultiplier: 1.5,
+		aria2HealthCheckInterval: 300,
+		riskControlTimeout: 300,
+		autoSolveMaxRetries: 3,
+		autoSolveTimeout: 120,
+		aiRenameTimeoutSeconds: 20,
+		notificationMinVideos: 1
+	} as const;
+
+	function normalizeNumberInput(value: unknown, fallback: number): number {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+
+		if (typeof value === 'string') {
+			const trimmed = value.trim();
+			if (trimmed) {
+				const parsed = Number(trimmed);
+				if (Number.isFinite(parsed)) {
+					return parsed;
+				}
+			}
+		}
+
+		return fallback;
+	}
+
 	// 表单数据
 	let videoName = '{{upper_name}}';
 	let pageName = '{{pubtime}}-{{bvid}}-{{truncate title 20}}';
@@ -151,10 +215,12 @@
 	let folderStructure = 'Season {{season_pad}}';
 	let bangumiFolderName = '{{title}}';
 	let collectionFolderMode = 'unified';
-	let collectionUnifiedName = 'S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}';
+	let collectionUnifiedName =
+		'S01E{{episode_pad}}{{#if is_multi_page}}P{{pid_pad}}{{/if}} - {{title}}';
 	let timeFormat = '%Y-%m-%d';
 	let interval = 1200;
 	let nfoTimeType = 'favtime';
+	let nfoIncludeGenre = true;
 	let bindAddress = '0.0.0.0:12345';
 	let parallelDownloadEnabled = false;
 	let parallelDownloadThreads = 4;
@@ -296,7 +362,7 @@
 	let aiRenameBaseUrl = 'https://api.deepseek.com/v1';
 	let aiRenameApiKey = '';
 	let aiRenameDeepseekWebToken = '';
-	let aiRenameModel = 'deepseek-chat';
+	let aiRenameModel = 'deepseek-v4-flash';
 	let aiRenameTimeoutSeconds = 30;
 	let aiRenameVideoPromptHint = '';
 	let aiRenameAudioPromptHint = '';
@@ -516,6 +582,7 @@
 		timeFormat = config.time_format || '';
 		interval = config.interval || 1200;
 		nfoTimeType = config.nfo_time_type || 'favtime';
+		nfoIncludeGenre = config.nfo_include_genre ?? DEFAULT_CONFIG_VALUES.nfoIncludeGenre;
 		bindAddress = config.bind_address || '0.0.0.0:12345';
 		parallelDownloadEnabled = config.parallel_download_enabled || false;
 		parallelDownloadThreads = config.parallel_download_threads || 4;
@@ -628,7 +695,7 @@
 		aiRenameBaseUrl = config.ai_rename?.base_url || 'https://api.deepseek.com/v1';
 		aiRenameApiKey = config.ai_rename?.api_key || '';
 		aiRenameDeepseekWebToken = config.ai_rename?.deepseek_web_token || '';
-		aiRenameModel = config.ai_rename?.model || 'deepseek-chat';
+		aiRenameModel = config.ai_rename?.model || 'deepseek-v4-flash';
 		aiRenameTimeoutSeconds = config.ai_rename?.timeout_seconds ?? 30;
 		aiRenameVideoPromptHint = config.ai_rename?.video_prompt_hint || '';
 		aiRenameAudioPromptHint = config.ai_rename?.audio_prompt_hint || '';
@@ -701,9 +768,9 @@
 	function validateCollectionUnifiedName(value: string) {
 		const trimmed = value.trim();
 		if (!trimmed) {
-			collectionUnifiedNameError = '合集统一命名模板不能为空';
-			collectionUnifiedNameValid = false;
-			return false;
+			collectionUnifiedNameError = '';
+			collectionUnifiedNameValid = true;
+			return true;
 		}
 		if (hasPathSeparatorOutsideHandlebars(trimmed)) {
 			collectionUnifiedNameError = '合集统一命名模板不应包含路径分隔符 / 或 \\\\';
@@ -719,9 +786,9 @@
 	function validateBindAddress(value: string) {
 		const trimmedValue = value.trim();
 		if (!trimmedValue) {
-			bindAddressError = '绑定地址不能为空';
-			bindAddressValid = false;
-			return false;
+			bindAddressError = '';
+			bindAddressValid = true;
+			return true;
 		}
 
 		// 检查是否包含端口号
@@ -827,7 +894,7 @@
 			return;
 		}
 
-		const params = {
+		const params: UpdateConfigRequest = {
 			video_name: videoName,
 			page_name: pageName,
 			multi_page_name: multiPageName,
@@ -837,47 +904,96 @@
 			collection_folder_mode: collectionFolderMode,
 			collection_unified_name: collectionUnifiedName,
 			time_format: timeFormat,
-			interval: interval,
+			interval: normalizeNumberInput(interval, DEFAULT_CONFIG_VALUES.interval),
 			nfo_time_type: nfoTimeType,
+			nfo_include_genre: nfoIncludeGenre,
 			bind_address: bindAddress,
 			parallel_download_enabled: parallelDownloadEnabled,
-			parallel_download_threads: parallelDownloadThreads,
+			parallel_download_threads: normalizeNumberInput(
+				parallelDownloadThreads,
+				DEFAULT_CONFIG_VALUES.parallelDownloadThreads
+			),
 			parallel_download_use_aria2: parallelDownloadUseAria2,
 			// 视频质量设置
 			video_max_quality: videoMaxQuality,
 			video_min_quality: videoMinQuality,
 			audio_max_quality: audioMaxQuality,
 			audio_min_quality: audioMinQuality,
-			codecs: codecs,
+			codecs: codecs.length > 0 ? codecs : [...DEFAULT_CONFIG_VALUES.codecs],
 			no_dolby_video: noDolbyVideo,
 			no_dolby_audio: noDolbyAudio,
 			no_hdr: noHdr,
 			no_hires: noHires,
 			// 弹幕设置
-			danmaku_duration: danmakuDuration,
+			danmaku_duration: normalizeNumberInput(
+				danmakuDuration,
+				DEFAULT_CONFIG_VALUES.danmakuDuration
+			),
 			danmaku_font: danmakuFont,
-			danmaku_font_size: danmakuFontSize,
-			danmaku_width_ratio: danmakuWidthRatio,
-			danmaku_horizontal_gap: danmakuHorizontalGap,
-			danmaku_lane_size: danmakuLaneSize,
-			danmaku_float_percentage: danmakuFloatPercentage,
-			danmaku_bottom_percentage: danmakuBottomPercentage,
-			danmaku_opacity: danmakuOpacity,
+			danmaku_font_size: normalizeNumberInput(
+				danmakuFontSize,
+				DEFAULT_CONFIG_VALUES.danmakuFontSize
+			),
+			danmaku_width_ratio: normalizeNumberInput(
+				danmakuWidthRatio,
+				DEFAULT_CONFIG_VALUES.danmakuWidthRatio
+			),
+			danmaku_horizontal_gap: normalizeNumberInput(
+				danmakuHorizontalGap,
+				DEFAULT_CONFIG_VALUES.danmakuHorizontalGap
+			),
+			danmaku_lane_size: normalizeNumberInput(
+				danmakuLaneSize,
+				DEFAULT_CONFIG_VALUES.danmakuLaneSize
+			),
+			danmaku_float_percentage: normalizeNumberInput(
+				danmakuFloatPercentage,
+				DEFAULT_CONFIG_VALUES.danmakuFloatPercentage
+			),
+			danmaku_bottom_percentage: normalizeNumberInput(
+				danmakuBottomPercentage,
+				DEFAULT_CONFIG_VALUES.danmakuBottomPercentage
+			),
+			danmaku_opacity: normalizeNumberInput(danmakuOpacity, DEFAULT_CONFIG_VALUES.danmakuOpacity),
 			danmaku_bold: danmakuBold,
-			danmaku_outline: danmakuOutline,
-			danmaku_time_offset: danmakuTimeOffset,
+			danmaku_outline: normalizeNumberInput(danmakuOutline, DEFAULT_CONFIG_VALUES.danmakuOutline),
+			danmaku_time_offset: normalizeNumberInput(
+				danmakuTimeOffset,
+				DEFAULT_CONFIG_VALUES.danmakuTimeOffset
+			),
 			danmaku_update_enabled: danmakuUpdateEnabled,
-			danmaku_update_fresh_days: danmakuUpdateFreshDays,
-			danmaku_update_fresh_interval_hours: danmakuUpdateFreshIntervalHours,
-			danmaku_update_mature_days: danmakuUpdateMatureDays,
-			danmaku_update_mature_interval_days: danmakuUpdateMatureIntervalDays,
-			danmaku_update_cold_days: danmakuUpdateColdDays,
-			danmaku_update_cold_interval_days: danmakuUpdateColdIntervalDays,
+			danmaku_update_fresh_days: normalizeNumberInput(
+				danmakuUpdateFreshDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateFreshDays
+			),
+			danmaku_update_fresh_interval_hours: normalizeNumberInput(
+				danmakuUpdateFreshIntervalHours,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateFreshIntervalHours
+			),
+			danmaku_update_mature_days: normalizeNumberInput(
+				danmakuUpdateMatureDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateMatureDays
+			),
+			danmaku_update_mature_interval_days: normalizeNumberInput(
+				danmakuUpdateMatureIntervalDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateMatureIntervalDays
+			),
+			danmaku_update_cold_days: normalizeNumberInput(
+				danmakuUpdateColdDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateColdDays
+			),
+			danmaku_update_cold_interval_days: normalizeNumberInput(
+				danmakuUpdateColdIntervalDays,
+				DEFAULT_CONFIG_VALUES.danmakuUpdateColdIntervalDays
+			),
 			// 并发控制设置
-			concurrent_video: concurrentVideo,
-			concurrent_page: concurrentPage,
-			rate_limit: rateLimit,
-			rate_duration: rateDuration,
+			concurrent_video: normalizeNumberInput(
+				concurrentVideo,
+				DEFAULT_CONFIG_VALUES.concurrentVideo
+			),
+			concurrent_page: normalizeNumberInput(concurrentPage, DEFAULT_CONFIG_VALUES.concurrentPage),
+			rate_limit: normalizeNumberInput(rateLimit, DEFAULT_CONFIG_VALUES.rateLimit),
+			rate_duration: normalizeNumberInput(rateDuration, DEFAULT_CONFIG_VALUES.rateDuration),
 			// 其他设置
 			cdn_sorting: cdnSorting,
 			scan_deleted_videos: scanDeletedVideos,
@@ -888,27 +1004,60 @@
 			bangumi_quick_subscribe_path: bangumiQuickSubscribePath,
 			ffmpeg_path: ffmpegPath,
 			// UP主投稿风控配置
-			large_submission_threshold: largeSubmissionThreshold,
-			base_request_delay: baseRequestDelay,
-			large_submission_delay_multiplier: largeSubmissionDelayMultiplier,
+			large_submission_threshold: normalizeNumberInput(
+				largeSubmissionThreshold,
+				DEFAULT_CONFIG_VALUES.largeSubmissionThreshold
+			),
+			base_request_delay: normalizeNumberInput(
+				baseRequestDelay,
+				DEFAULT_CONFIG_VALUES.baseRequestDelay
+			),
+			large_submission_delay_multiplier: normalizeNumberInput(
+				largeSubmissionDelayMultiplier,
+				DEFAULT_CONFIG_VALUES.largeSubmissionDelayMultiplier
+			),
 			enable_progressive_delay: enableProgressiveDelay,
-			max_delay_multiplier: maxDelayMultiplier,
+			max_delay_multiplier: normalizeNumberInput(
+				maxDelayMultiplier,
+				DEFAULT_CONFIG_VALUES.maxDelayMultiplier
+			),
 			enable_incremental_fetch: enableIncrementalFetch,
 			incremental_fallback_to_full: incrementalFallbackToFull,
 			enable_batch_processing: enableBatchProcessing,
-			batch_size: batchSize,
-			batch_delay_seconds: batchDelaySeconds,
+			batch_size: normalizeNumberInput(batchSize, DEFAULT_CONFIG_VALUES.batchSize),
+			batch_delay_seconds: normalizeNumberInput(
+				batchDelaySeconds,
+				DEFAULT_CONFIG_VALUES.batchDelaySeconds
+			),
 			enable_auto_backoff: enableAutoBackoff,
-			auto_backoff_base_seconds: autoBackoffBaseSeconds,
-			auto_backoff_max_multiplier: autoBackoffMaxMultiplier,
-			source_delay_seconds: sourceDelaySeconds,
-			submission_source_delay_seconds: submissionSourceDelaySeconds,
+			auto_backoff_base_seconds: normalizeNumberInput(
+				autoBackoffBaseSeconds,
+				DEFAULT_CONFIG_VALUES.autoBackoffBaseSeconds
+			),
+			auto_backoff_max_multiplier: normalizeNumberInput(
+				autoBackoffMaxMultiplier,
+				DEFAULT_CONFIG_VALUES.autoBackoffMaxMultiplier
+			),
+			source_delay_seconds: normalizeNumberInput(
+				sourceDelaySeconds,
+				DEFAULT_CONFIG_VALUES.sourceDelaySeconds
+			),
+			submission_source_delay_seconds: normalizeNumberInput(
+				submissionSourceDelaySeconds,
+				DEFAULT_CONFIG_VALUES.submissionSourceDelaySeconds
+			),
 			enable_dynamic_api_delay: enableDynamicApiDelay,
-			dynamic_api_delay_multiplier: dynamicApiDelayMultiplier,
+			dynamic_api_delay_multiplier: normalizeNumberInput(
+				dynamicApiDelayMultiplier,
+				DEFAULT_CONFIG_VALUES.dynamicApiDelayMultiplier
+			),
 			// aria2监控配置
 			enable_aria2_health_check: enableAria2HealthCheck,
 			enable_aria2_auto_restart: enableAria2AutoRestart,
-			aria2_health_check_interval: aria2HealthCheckInterval,
+			aria2_health_check_interval: normalizeNumberInput(
+				aria2HealthCheckInterval,
+				DEFAULT_CONFIG_VALUES.aria2HealthCheckInterval
+			),
 			// 多P视频目录结构配置
 			multi_page_use_season_structure: multiPageUseSeasonStructure,
 			// 合集目录结构配置
@@ -918,7 +1067,10 @@
 			// 风控验证配置
 			risk_control_enabled: riskControlEnabled,
 			risk_control_mode: riskControlMode,
-			risk_control_timeout: riskControlTimeout
+			risk_control_timeout: normalizeNumberInput(
+				riskControlTimeout,
+				DEFAULT_CONFIG_VALUES.riskControlTimeout
+			)
 		};
 
 		const response = await runRequest(() => api.updateConfig(params), {
@@ -929,7 +1081,14 @@
 
 		if (response.data.success) {
 			// 检查是否修改了bind_address，如果是则提醒需要重启
-			if (params.bind_address && params.bind_address !== config?.bind_address) {
+			const trimmedBindAddress = bindAddress.trim();
+			const nextBindAddress = trimmedBindAddress
+				? trimmedBindAddress.includes(':')
+					? trimmedBindAddress
+					: `0.0.0.0:${trimmedBindAddress}`
+				: DEFAULT_CONFIG_VALUES.bindAddress;
+
+			if (nextBindAddress !== (config?.bind_address ?? DEFAULT_CONFIG_VALUES.bindAddress)) {
 				toast.success('保存成功', {
 					description: '端口配置已更新，请重启程序使配置生效',
 					duration: 8000 // 延长显示时间
@@ -1031,40 +1190,29 @@
 		const config: NotificationUpdateConfig = {
 			active_channel: activeNotificationChannel,
 			enable_scan_notifications: notificationEnabled,
-			notification_min_videos: notificationMinVideos
+			notification_min_videos: normalizeNumberInput(
+				notificationMinVideos,
+				DEFAULT_CONFIG_VALUES.notificationMinVideos
+			)
 		};
 
 		// 根据选择的渠道提交相应配置
 		if (activeNotificationChannel === 'serverchan') {
-			if (serverchanKey.trim()) {
-				config.serverchan_key = serverchanKey.trim();
-			}
+			config.serverchan_key = serverchanKey.trim();
 		} else if (activeNotificationChannel === 'serverchan3') {
-			if (serverchan3Uid.trim()) {
-				config.serverchan3_uid = serverchan3Uid.trim();
-			}
-			if (serverchan3Sendkey.trim()) {
-				config.serverchan3_sendkey = serverchan3Sendkey.trim();
-			}
+			config.serverchan3_uid = serverchan3Uid.trim();
+			config.serverchan3_sendkey = serverchan3Sendkey.trim();
 		} else if (activeNotificationChannel === 'wecom') {
-			if (wecomWebhookUrl.trim()) {
-				config.wecom_webhook_url = wecomWebhookUrl.trim();
-			}
+			config.wecom_webhook_url = wecomWebhookUrl.trim();
 			config.wecom_msgtype = wecomMsgtype;
 			config.wecom_mention_all = wecomMentionAll;
-			if (wecomMentionedList.trim()) {
-				config.wecom_mentioned_list = wecomMentionedList
-					.split(',')
-					.map((s) => s.trim())
-					.filter((s) => s);
-			}
+			config.wecom_mentioned_list = wecomMentionedList
+				.split(',')
+				.map((s) => s.trim())
+				.filter((s) => s);
 		} else if (activeNotificationChannel === 'webhook') {
-			if (webhookUrl.trim()) {
-				config.webhook_url = webhookUrl.trim();
-			}
-			if (webhookBearerToken.trim()) {
-				config.webhook_bearer_token = webhookBearerToken.trim();
-			}
+			config.webhook_url = webhookUrl.trim();
+			config.webhook_bearer_token = webhookBearerToken.trim();
 			config.webhook_custom_headers = webhookCustomHeaders.trim();
 			config.webhook_format = webhookFormat;
 			config.webhook_custom_body = webhookCustomBody.trim();
@@ -1092,11 +1240,20 @@
 		const config: UpdateConfigRequest = {
 			risk_control_enabled: riskControlEnabled,
 			risk_control_mode: riskControlMode,
-			risk_control_timeout: riskControlTimeout,
+			risk_control_timeout: normalizeNumberInput(
+				riskControlTimeout,
+				DEFAULT_CONFIG_VALUES.riskControlTimeout
+			),
 			risk_control_auto_solve_service: autoSolveService,
-			risk_control_auto_solve_api_key: autoSolveApiKey,
-			risk_control_auto_solve_max_retries: autoSolveMaxRetries,
-			risk_control_auto_solve_timeout: autoSolveTimeout
+			risk_control_auto_solve_api_key: autoSolveApiKey.trim(),
+			risk_control_auto_solve_max_retries: normalizeNumberInput(
+				autoSolveMaxRetries,
+				DEFAULT_CONFIG_VALUES.autoSolveMaxRetries
+			),
+			risk_control_auto_solve_timeout: normalizeNumberInput(
+				autoSolveTimeout,
+				DEFAULT_CONFIG_VALUES.autoSolveTimeout
+			)
 		};
 
 		const response = await runRequest(() => api.updateConfig(config), {
@@ -1119,14 +1276,17 @@
 	async function saveAiRenameConfig() {
 		const config: UpdateConfigRequest = {
 			ai_rename_enabled: aiRenameEnabled,
-			ai_rename_provider: aiRenameProvider,
-			ai_rename_base_url: aiRenameBaseUrl,
-			ai_rename_api_key: aiRenameApiKey || undefined,
-			ai_rename_deepseek_web_token: aiRenameDeepseekWebToken || undefined,
-			ai_rename_model: aiRenameModel,
-			ai_rename_timeout_seconds: aiRenameTimeoutSeconds,
-			ai_rename_video_prompt_hint: aiRenameVideoPromptHint || undefined,
-			ai_rename_audio_prompt_hint: aiRenameAudioPromptHint || undefined,
+			ai_rename_provider: aiRenameProvider.trim(),
+			ai_rename_base_url: aiRenameBaseUrl.trim(),
+			ai_rename_api_key: aiRenameApiKey.trim(),
+			ai_rename_deepseek_web_token: aiRenameDeepseekWebToken.trim(),
+			ai_rename_model: aiRenameModel.trim(),
+			ai_rename_timeout_seconds: normalizeNumberInput(
+				aiRenameTimeoutSeconds,
+				DEFAULT_CONFIG_VALUES.aiRenameTimeoutSeconds
+			),
+			ai_rename_video_prompt_hint: aiRenameVideoPromptHint,
+			ai_rename_audio_prompt_hint: aiRenameAudioPromptHint,
 			ai_rename_rename_parent_dir: aiRenameRenameParentDir
 		};
 
@@ -1261,9 +1421,7 @@
 			</h1>
 
 			{#if loading}
-				<div class="flex items-center justify-center py-12">
-					<div class="text-muted-foreground">加载中...</div>
-				</div>
+				<Loading />
 			{:else}
 				<!-- 设置分类卡片列表 -->
 				<div
@@ -1324,10 +1482,7 @@
 		class="flex flex-col {isMobile ? 'h-[calc(90vh-8rem)]' : 'h-[calc(100vh-12rem)]'}"
 	>
 		<div class="min-h-0 flex-1 space-y-6 overflow-y-auto {isMobile ? 'px-4 py-4' : 'px-6 py-6'}">
-			<SectionHeader
-				title="文件命名模板"
-				titleTooltip="配置视频、分页和番剧的命名模板与变量规则。"
-			>
+			<SectionHeader title="文件命名模板" titleTooltip="配置视频、分页和番剧的命名模板与变量规则。">
 				{#snippet actions()}
 					<button
 						type="button"
@@ -1643,6 +1798,23 @@
 					选择NFO文件中使用的时间类型。
 					<span class="font-medium text-amber-600">注意：</span>
 					更改此设置后，系统会自动重置所有NFO相关任务状态，并立即开始重新生成NFO文件以应用新的时间类型。
+				</p>
+			</div>
+
+			<div class="space-y-2">
+				<div class="flex items-center space-x-2">
+					<input
+						type="checkbox"
+						id="nfo-include-genre"
+						bind:checked={nfoIncludeGenre}
+						class="text-primary focus:ring-primary h-4 w-4 rounded border-gray-300"
+					/>
+					<Label for="nfo-include-genre" class="text-sm">NFO写入&lt;genre&gt;标签</Label>
+				</div>
+				<p class="text-muted-foreground text-sm">
+					关闭后，新生成的 NFO 不再写入 <code>&lt;genre&gt;</code> 标签。
+					<span class="font-medium text-amber-600">注意：</span>
+					更改此设置不会改动已有 NFO 文件，只会影响之后新生成的 NFO。
 				</p>
 			</div>
 
@@ -2227,8 +2399,10 @@
 
 				<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
 					<div class="space-y-2">
-						<Label for="danmaku-update-fresh-days" class="cursor-help" title={danmakuUpdateHelp.freshDays}
-							>新鲜期天数</Label
+						<Label
+							for="danmaku-update-fresh-days"
+							class="cursor-help"
+							title={danmakuUpdateHelp.freshDays}>新鲜期天数</Label
 						>
 						<Input
 							id="danmaku-update-fresh-days"
@@ -2295,8 +2469,10 @@
 					</div>
 
 					<div class="space-y-2">
-						<Label for="danmaku-update-cold-days" class="cursor-help" title={danmakuUpdateHelp.coldDays}
-							>老化期截至天数</Label
+						<Label
+							for="danmaku-update-cold-days"
+							class="cursor-help"
+							title={danmakuUpdateHelp.coldDays}>老化期截至天数</Label
 						>
 						<Input
 							id="danmaku-update-cold-days"
@@ -2649,7 +2825,8 @@
 					</div>
 					<div class="rounded-md bg-yellow-50 p-3 dark:bg-yellow-950/20">
 						<p class="text-xs text-yellow-800 dark:text-yellow-200">
-							动态API每次最多返回 12 条记录。首次全量扫描请求次数多，建议保持启用延迟，后续增量扫描耗时较小。
+							动态API每次最多返回 12
+							条记录。首次全量扫描请求次数多，建议保持启用延迟，后续增量扫描耗时较小。
 						</p>
 					</div>
 				</div>
@@ -3185,7 +3362,9 @@
 					<div class="space-y-1">
 						<h4 class="text-sm font-medium">快捷订阅路径模板</h4>
 						<p class="text-muted-foreground text-sm">
-							添加收藏夹、合集、UP主投稿、番剧源时可直接带出保存路径。支持使用 <code>{'{{name}}'}</code>
+							添加收藏夹、合集、UP主投稿、番剧源时可直接带出保存路径。支持使用 <code
+								>{'{{name}}'}</code
+							>
 							代表源名称。
 						</p>
 					</div>
@@ -3412,7 +3591,8 @@
 							<option value="custom">自定义 JSON</option>
 						</select>
 						<p class="text-muted-foreground text-sm">
-							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON 可自行定义 POST Body 结构
+							自动识别会根据URL判断；openSend 会发送其专用字段并附带 apikey 头；自定义 JSON
+							可自行定义 POST Body 结构
 						</p>
 					</div>
 
@@ -3453,8 +3633,13 @@
 						/>
 						<div class="text-muted-foreground space-y-1 text-sm">
 							<p>请填写 JSON 对象，键和值都必须是字符串。</p>
-							<p>例如：<code>{'{"Authorization":"Bearer your-token","X-Channel":"clawbot"}'}</code></p>
-							<p>如与自动附带的 Bearer Token 或 openSend 的 apikey 同名，自定义 Headers 会覆盖默认值。</p>
+							<p>
+								例如：<code>{'{"Authorization":"Bearer your-token","X-Channel":"clawbot"}'}</code>
+							</p>
+							<p>
+								如与自动附带的 Bearer Token 或 openSend 的 apikey 同名，自定义 Headers
+								会覆盖默认值。
+							</p>
 						</div>
 					</div>
 
@@ -3481,14 +3666,19 @@
 								class="font-mono text-xs"
 							/>
 							<div class="text-muted-foreground space-y-1 text-sm">
-								<p>支持占位符：&#123;&#123;source&#125;&#125;、&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;</p>
+								<p>
+									支持占位符：&#123;&#123;source&#125;&#125;、&#123;&#123;title&#125;&#125;、&#123;&#123;content&#125;&#125;、&#123;&#123;channel&#125;&#125;、&#123;&#123;event&#125;&#125;、&#123;&#123;sent_at&#125;&#125;
+								</p>
 								<p>&#123;&#123;source&#125;&#125;：固定来源名，当前为 bili-sync</p>
 								<p>&#123;&#123;title&#125;&#125;：推送标题</p>
 								<p>&#123;&#123;content&#125;&#125;：推送正文内容</p>
 								<p>&#123;&#123;channel&#125;&#125;：当前通知渠道名称，例如 webhook</p>
 								<p>&#123;&#123;event&#125;&#125;：事件类型，例如 test_notification</p>
 								<p>&#123;&#123;sent_at&#125;&#125;：发送时间</p>
-								<p>请直接填写有效 JSON。若某个值只写占位符，发送时会按原始类型写入；若嵌在字符串中，则会按文本替换。</p>
+								<p>
+									请直接填写有效
+									JSON。若某个值只写占位符，发送时会按原始类型写入；若嵌在字符串中，则会按文本替换。
+								</p>
 							</div>
 						</div>
 					{/if}
@@ -4059,10 +4249,10 @@
 							id="ai-rename-model"
 							type="text"
 							bind:value={aiRenameModel}
-							placeholder="deepseek-chat"
+							placeholder="deepseek-v4-flash"
 						/>
 						<p class="text-muted-foreground text-xs">
-							DeepSeek推荐: deepseek-chat | OpenAI推荐: gpt-4o-mini 或 gpt-3.5-turbo
+							DeepSeek推荐: deepseek-v4-flash；高质量可用 deepseek-v4-pro。旧的 deepseek-chat / deepseek-reasoner 将于 2026-07-24 停用。
 						</p>
 					</div>
 				{/if}

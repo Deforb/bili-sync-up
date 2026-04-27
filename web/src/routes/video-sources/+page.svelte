@@ -19,6 +19,10 @@
 	import SubmissionSelectionDialog from '$lib/components/submission-selection-dialog.svelte';
 	import KeywordFilterDialog from '$lib/components/keyword-filter-dialog.svelte';
 	import AiPromptDialog from '$lib/components/ai-prompt-dialog.svelte';
+	import SectionHeader from '$lib/components/section-header.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
+	import SelectAllButton from '$lib/components/select-all-button.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
 	import AiRenameHistoryDialog from '$lib/components/ai-rename-history-dialog.svelte';
 	import type { VideoSource, VideoSourcesResponse } from '$lib/types';
 
@@ -41,13 +45,14 @@
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import { goto } from '$app/navigation';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
+	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
+	import { createManagedEventSource } from '$lib/utils/live-event-source';
 
 	let loading = false;
 	let bulkUpdating = false;
 	let watchLaterCleanupLoadingSourceId: number | null = null;
-	let sourcesEventSource: EventSource | null = null;
-	let currentSourcesStreamUrl: string | null = null;
+	const videoSourcesStream = createManagedEventSource();
 	const queuedDeleteNoticeMap = new Map<
 		string,
 		{ sourceType: VideoSourceType; sourceId: number; sourceName: string }
@@ -140,9 +145,7 @@
 
 	function formatLatestVideoTime(value: string | null | undefined): string {
 		const normalized = normalizeBeijingDateTime(value);
-		if (!normalized) return '-';
-		const formatted = formatTimestamp(normalized, 'Asia/Shanghai', 'datetime');
-		return formatted === '无效时间' || formatted === '格式化失败' ? value ?? '-' : formatted;
+		return formatTimestampOrFallback(normalized, 'Asia/Shanghai', 'datetime', value ?? '-');
 	}
 
 	function getLatestVideoAgeDays(value: string | null | undefined): number | null {
@@ -181,13 +184,7 @@
 	}
 
 	function buildVideoSourcesStreamUrl(): string | null {
-		if (typeof localStorage === 'undefined') return null;
-		const token = localStorage.getItem('auth_token');
-		if (!token) return null;
-
-		const searchParams = new URLSearchParams();
-		searchParams.append('token', token);
-		return `/api/video-sources/live?${searchParams.toString()}`;
+		return buildAuthenticatedStreamUrl('/api/video-sources/live');
 	}
 
 	function sourceStillExists(
@@ -224,44 +221,27 @@
 	}
 
 	function stopVideoSourcesStream() {
-		if (sourcesEventSource) {
-			sourcesEventSource.close();
-			sourcesEventSource = null;
-		}
-		currentSourcesStreamUrl = null;
+		videoSourcesStream.stop();
 	}
 
 	function startVideoSourcesStream() {
-		const streamUrl = buildVideoSourcesStreamUrl();
-		if (!streamUrl) {
-			stopVideoSourcesStream();
-			return;
-		}
-
-		if (sourcesEventSource && currentSourcesStreamUrl === streamUrl) {
-			return;
-		}
-
-		stopVideoSourcesStream();
-		currentSourcesStreamUrl = streamUrl;
-
-		const eventSource = new EventSource(streamUrl);
-		sourcesEventSource = eventSource;
-
-		eventSource.addEventListener('sources', (event) => {
-			try {
-				const payload = JSON.parse((event as MessageEvent).data) as VideoSourcesResponse;
-				notifyCompletedQueuedDeletions(payload);
-				setVideoSources(payload);
-			} catch (error) {
-				console.error('解析视频源实时更新失败:', error);
+		videoSourcesStream.start({
+			url: buildVideoSourcesStreamUrl(),
+			handlers: {
+				sources: (event) => {
+					try {
+						const payload = JSON.parse(event.data) as VideoSourcesResponse;
+						notifyCompletedQueuedDeletions(payload);
+						setVideoSources(payload);
+					} catch (error) {
+						console.error('解析视频源实时更新失败:', error);
+					}
+				}
+			},
+			onError: () => {
+				console.warn('视频源实时更新连接异常，等待浏览器自动重连');
 			}
 		});
-
-		eventSource.onerror = () => {
-			if (sourcesEventSource !== eventSource) return;
-			console.warn('视频源实时更新连接异常，等待浏览器自动重连');
-		};
 	}
 
 	// 投稿源扫描策略配置（分批/自适应）
@@ -1174,32 +1154,28 @@
 
 <div class="space-y-6">
 	<!-- 页面头部 -->
-	<div class="flex {isMobile ? 'flex-col gap-4' : 'flex-row items-center justify-between gap-4'}">
-		<div>
-			<h1
-				class="{isMobile ? 'text-xl' : 'text-2xl'} font-bold"
-				title="管理和配置收藏夹、合集、投稿、番剧与稍后再看视频源"
+	<SectionHeader
+		as="h1"
+		title="视频源管理"
+		description="管理和配置您的视频源，包括收藏夹、合集、投稿和稍后再看。"
+		titleTooltip="管理和配置收藏夹、合集、投稿、番剧与稍后再看视频源"
+		titleClass="font-bold {isMobile ? 'text-xl' : 'text-2xl'}"
+		descriptionClass="text-muted-foreground {isMobile ? 'text-sm' : 'text-base'} mt-1"
+	>
+		{#snippet actions()}
+			<Button
+				onclick={navigateToAddSource}
+				class="flex items-center gap-2 {isMobile ? 'w-full' : 'w-auto'}"
+				title="添加新的视频源"
 			>
-				视频源管理
-			</h1>
-			<p class="{isMobile ? 'text-sm' : 'text-base'} text-muted-foreground">
-				管理和配置您的视频源，包括收藏夹、合集、投稿和稍后再看
-			</p>
-		</div>
-		<Button
-			onclick={navigateToAddSource}
-			class="flex items-center gap-2 {isMobile ? 'w-full' : 'w-auto'}"
-			title="添加新的视频源"
-		>
-			<PlusIcon class="h-4 w-4" />
-			添加视频源
-		</Button>
-	</div>
+				<PlusIcon class="h-4 w-4" />
+				添加视频源
+			</Button>
+		{/snippet}
+	</SectionHeader>
 
 	{#if loading}
-		<div class="flex items-center justify-center py-12">
-			<div class="text-muted-foreground">加载中...</div>
-		</div>
+		<Loading />
 	{:else}
 		<!-- 视频源分类展示 -->
 		<div class="grid gap-6">
@@ -1291,14 +1267,11 @@
 										</span>
 
 										<div class="ml-auto flex flex-wrap items-center gap-2">
-											<Button
-												size="sm"
-												variant="outline"
+											<SelectAllButton
 												disabled={bulkUpdating}
 												onclick={() => selectAll(sourceKey, sources)}
-											>
-												全选
-											</Button>
+												className="text-sm"
+											/>
 											<Button
 												size="sm"
 												variant="outline"
@@ -1358,23 +1331,23 @@
 														{source.enabled ? '已启用' : '已禁用'}
 													</Badge>
 												</div>
-											<div class="text-muted-foreground truncate text-sm" title={source.path}>
-												{source.path || '未设置路径'}
-											</div>
-											<div
-												class="text-muted-foreground mt-1 flex items-center gap-2 text-xs"
-												title="该视频源当前已发现的最新一条视频发布时间。最近 7 天内为绿色，8 到 30 天为黄色，31 天及以上为红色，可用于判断这个源最近是否还有更新"
-											>
-												<span>最新视频时间：</span>
-												<Badge
-													variant="outline"
-													class={getLatestVideoTimeBadgeClass(source.latest_row_at)}
+												<div class="text-muted-foreground truncate text-sm" title={source.path}>
+													{source.path || '未设置路径'}
+												</div>
+												<div
+													class="text-muted-foreground mt-1 flex items-center gap-2 text-xs"
+													title="该视频源当前已发现的最新一条视频发布时间。最近 7 天内为绿色，8 到 30 天为黄色，31 天及以上为红色，可用于判断这个源最近是否还有更新"
 												>
-													{formatLatestVideoTime(source.latest_row_at)}
-												</Badge>
-											</div>
-											<!-- 显示对应类型的ID -->
-											<div class="text-muted-foreground mt-1 text-xs">
+													<span>最新视频时间：</span>
+													<Badge
+														variant="outline"
+														class={getLatestVideoTimeBadgeClass(source.latest_row_at)}
+													>
+														{formatLatestVideoTime(source.latest_row_at)}
+													</Badge>
+												</div>
+												<!-- 显示对应类型的ID -->
+												<div class="text-muted-foreground mt-1 text-xs">
 													{#if sourceConfig.type === 'favorite' && source.f_id}
 														收藏夹ID: {source.f_id}
 													{:else if sourceConfig.type === 'collection' && source.s_id}
@@ -1766,25 +1739,25 @@
 									{/each}
 								</div>
 							{:else}
-								<div class="flex flex-col items-center justify-center py-8 text-center">
-									<sourceConfig.icon class="text-muted-foreground mb-4 h-12 w-12" />
-									<div class="text-muted-foreground mb-2">暂无{sourceConfig.title}</div>
-									<p class="text-muted-foreground mb-4 text-sm">
-										{#if sourceConfig.type === 'favorite'}
-											还没有添加任何收藏夹订阅
-										{:else if sourceConfig.type === 'collection'}
-											还没有添加任何合集或列表订阅
-										{:else if sourceConfig.type === 'submission'}
-											还没有添加任何UP主投稿订阅
-										{:else}
-											还没有添加稍后再看订阅
-										{/if}
-									</p>
-									<Button size="sm" variant="outline" onclick={navigateToAddSource}>
-										<PlusIcon class="mr-2 h-4 w-4" />
-										添加{sourceConfig.title}
-									</Button>
-								</div>
+								<EmptyState
+									icon={sourceConfig.icon}
+									title={`暂无${sourceConfig.title}`}
+									description={sourceConfig.type === 'favorite'
+										? '还没有添加任何收藏夹订阅'
+										: sourceConfig.type === 'collection'
+											? '还没有添加任何合集或列表订阅'
+											: sourceConfig.type === 'submission'
+												? '还没有添加任何UP主投稿订阅'
+												: '还没有添加稍后再看订阅'}
+									class="py-8"
+								>
+									{#snippet actions()}
+										<Button size="sm" variant="outline" onclick={navigateToAddSource}>
+											<PlusIcon class="mr-2 h-4 w-4" />
+											添加{sourceConfig.title}
+										</Button>
+									{/snippet}
+								</EmptyState>
 							{/if}
 						</CardContent>
 					{/if}

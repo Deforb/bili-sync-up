@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use crate::bilibili::analyzer::PageAnalyzer;
 use crate::bilibili::client::BiliClient;
 use crate::bilibili::credential::encoded_query;
-use crate::bilibili::danmaku::{DanmakuElem, DanmakuWriter, DmSegMobileReply};
+use crate::bilibili::danmaku::{DanmakuElem, DmSegMobileReply};
 use crate::bilibili::subtitle::{SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo};
 use crate::bilibili::{Validate, VideoInfo, MIXIN_KEY};
 use crate::hardware::HardwareFingerprint;
@@ -261,13 +261,16 @@ impl<'a> Video<'a> {
         if let Some(code) = json_res["code"].as_i64() {
             if code != 0 {
                 let message = json_res["message"].as_str().unwrap_or("未知错误");
-                tracing::warn!("视频详情API返回错误: code={}, message={}", code, message);
+                if !matches!(code, -404 | 62002 | 62012) {
+                    tracing::warn!("视频详情API返回错误: code={}, message={}", code, message);
+                }
 
                 // 对于特定的错误码，给出更详细的说明
                 match code {
                     -404 => tracing::debug!("视频不存在或已被删除，无法获取epid"),
                     -403 => tracing::debug!("无权限访问该视频，无法获取epid"),
                     62002 => tracing::debug!("稿件不可见，无法获取epid"),
+                    62012 => tracing::debug!("稿件仅自己可见，无法获取epid"),
                     _ => tracing::debug!("其他API错误，无法获取epid"),
                 }
 
@@ -450,14 +453,6 @@ impl<'a> Video<'a> {
         debug!("弹幕获取完成，共{}条弹幕", all_danmaku.len());
 
         Ok(all_danmaku)
-    }
-
-    pub async fn get_danmaku_writer(&self, page: &'a PageInfo, token: CancellationToken) -> Result<DanmakuWriter<'a>> {
-        let all_danmaku = self.get_danmaku_elements(page, token).await?;
-        Ok(DanmakuWriter::new(
-            page,
-            all_danmaku.into_iter().map(|x| x.into()).collect(),
-        ))
     }
 
     /// 带重试机制的弹幕分段获取

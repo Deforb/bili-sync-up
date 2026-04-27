@@ -102,14 +102,19 @@ pub struct Episode<'a> {
     pub user_rating: Option<f32>,
     pub director: Option<&'a str>,
     pub credits: Option<&'a str>,
-    pub bvid: &'a str,               // B站视频ID
-    pub category: i32,               // 视频分类（用于番剧检测）
-    pub mpaa: Option<&'a str>,       // 年龄分级
-    pub country: Option<&'a str>,    // 国家
-    pub studio: Option<&'a str>,     // 制作工作室
-    pub genres: Option<Vec<String>>, // 类型标签
-    pub thumb_url: Option<&'a str>,  // 缩略图URL
-    pub fanart_url: Option<&'a str>, // 背景图URL
+    pub bvid: &'a str,                             // B站视频ID
+    pub category: i32,                             // 视频分类（用于番剧检测）
+    pub mpaa: Option<&'a str>,                     // 年龄分级
+    pub country: Option<&'a str>,                  // 国家
+    pub studio: Option<&'a str>,                   // 制作工作室
+    pub genres: Option<Vec<String>>,               // 类型标签
+    pub upper_id: i64,                             // UP主UID
+    pub upper_name: &'a str,                       // UP主名称
+    pub actors_info: Option<String>,               // 演员信息字符串
+    pub staff_info: Option<&'a serde_json::Value>, // 联合投稿成员信息
+    pub thumb_url: Option<&'a str>,                // 缩略图URL
+    pub fanart_url: Option<&'a str>,               // 背景图URL
+    pub upper_face_url: Option<&'a str>,           // UP主头像URL（用于演员thumb）
 }
 
 pub struct Season<'a> {
@@ -150,6 +155,57 @@ pub struct Season<'a> {
 }
 
 impl NFO<'_> {
+    fn is_valid_xml_char(ch: char) -> bool {
+        matches!(ch, '\u{9}' | '\u{A}' | '\u{D}')
+            || ('\u{20}'..='\u{D7FF}').contains(&ch)
+            || ('\u{E000}'..='\u{FFFD}').contains(&ch)
+            || ('\u{10000}'..='\u{10FFFF}').contains(&ch)
+    }
+
+    fn sanitize_xml_str(input: &str) -> Cow<'_, str> {
+        if input.chars().all(Self::is_valid_xml_char) {
+            Cow::Borrowed(input)
+        } else {
+            Cow::Owned(input.chars().filter(|&ch| Self::is_valid_xml_char(ch)).collect())
+        }
+    }
+
+    async fn write_genre_tag(
+        writer: &mut Writer<&mut BufWriter<&mut Vec<u8>>>,
+        genre: &str,
+        config: &NFOConfig,
+    ) -> std::result::Result<(), Error> {
+        if !config.include_genre {
+            return Ok(());
+        }
+
+        writer
+            .create_element("genre")
+            .write_text_content_async(BytesText::new(genre))
+            .await?;
+
+        Ok(())
+    }
+
+    async fn write_genre_tags<'a, I>(
+        writer: &mut Writer<&mut BufWriter<&mut Vec<u8>>>,
+        genres: I,
+        config: &NFOConfig,
+    ) -> std::result::Result<(), Error>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        if !config.include_genre {
+            return Ok(());
+        }
+
+        for genre in genres {
+            Self::write_genre_tag(writer, genre, config).await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn generate_nfo(self) -> Result<String> {
         let config = crate::config::reload_config();
         let mut buffer = r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>
@@ -176,7 +232,8 @@ impl NFO<'_> {
             }
         }
         tokio_buffer.flush().await?;
-        Ok(String::from_utf8(buffer)?)
+        let xml = String::from_utf8(buffer)?;
+        Ok(Self::sanitize_xml_str(&xml).into_owned())
     }
 
     async fn write_movie_nfo(
@@ -265,7 +322,7 @@ impl NFO<'_> {
                 // 剧情简介
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(Self::format_plot(movie.bvid, movie.intro)))
+                    .write_cdata_content_async(BytesCData::new(movie.intro))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -286,25 +343,14 @@ impl NFO<'_> {
                     .await?;
 
                 // 类型标签
-                if let Some(tags) = movie.tags {
-                    for tag in tags {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(&tag))
-                            .await?;
-                    }
+                if let Some(ref tags) = movie.tags {
+                    Self::write_genre_tags(writer, tags.iter().map(String::as_str), config).await?;
                 }
 
                 // 为番剧剧场版添加默认类型标签
                 if Self::is_bangumi_video(movie.category) {
-                    writer
-                        .create_element("genre")
-                        .write_text_content_async(BytesText::new("动画"))
-                        .await?;
-                    writer
-                        .create_element("genre")
-                        .write_text_content_async(BytesText::new("剧场版"))
-                        .await?;
+                    Self::write_genre_tag(writer, "动画", config).await?;
+                    Self::write_genre_tag(writer, "剧场版", config).await?;
                 }
 
                 // 国家信息
@@ -641,17 +687,9 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介
-                let plot_link = tvshow
-                    .plot_link_override
-                    .clone()
-                    .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}/", tvshow.bvid));
                 writer
                     .create_element("plot")
-                    .write_cdata_content_async(BytesCData::new(Self::format_plot_with_link(
-                        &plot_link,
-                        tvshow.bvid,
-                        tvshow.intro,
-                    )))
+                    .write_cdata_content_async(BytesCData::new(tvshow.intro))
                     .await?;
                 writer.create_element("outline").write_empty_async().await?;
 
@@ -699,13 +737,8 @@ impl NFO<'_> {
                 }
 
                 // 类型标签
-                if let Some(tags) = tvshow.tags {
-                    for tag in tags {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(&tag))
-                            .await?;
-                    }
+                if let Some(ref tags) = tvshow.tags {
+                    Self::write_genre_tags(writer, tags.iter().map(String::as_str), config).await?;
                 }
 
                 // 国家信息
@@ -1048,20 +1081,12 @@ impl NFO<'_> {
 
                 // 类型标签
                 if let Some(ref genres) = episode.genres {
-                    for genre in genres {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(genre))
-                            .await?;
-                    }
+                    Self::write_genre_tags(writer, genres.iter().map(String::as_str), config).await?;
                 }
 
                 // 为番剧添加默认类型标签
                 if Self::is_bangumi_video(episode.category) {
-                    writer
-                        .create_element("genre")
-                        .write_text_content_async(BytesText::new("动画"))
-                        .await?;
+                    Self::write_genre_tag(writer, "动画", config).await?;
                 }
 
                 // 国家信息
@@ -1141,6 +1166,116 @@ impl NFO<'_> {
                         .create_element("credits")
                         .write_text_content_async(BytesText::new(credits))
                         .await?;
+                }
+
+                // 演员信息（优先使用真实演员信息，其次联合投稿staff，最后UP主）
+                if config.include_actor_info {
+                    if let Some(ref actors_str) = episode.actors_info {
+                        let actors = Self::parse_actors_string(actors_str);
+                        for (index, (character, actor)) in actors.iter().enumerate() {
+                            writer
+                                .create_element("actor")
+                                .write_inner_content_async::<_, _, Error>(|writer| async move {
+                                    writer
+                                        .create_element("name")
+                                        .write_text_content_async(BytesText::new(actor))
+                                        .await?;
+                                    writer
+                                        .create_element("role")
+                                        .write_text_content_async(BytesText::new(character))
+                                        .await?;
+                                    writer
+                                        .create_element("order")
+                                        .write_text_content_async(BytesText::new(&(index + 1).to_string()))
+                                        .await?;
+                                    Ok(writer)
+                                })
+                                .await?;
+                        }
+                    } else if let Some(ref staff_info) = episode.staff_info {
+                        let staff_list = Self::parse_staff_info(staff_info);
+                        for (index, (mid, name, title, face)) in staff_list.iter().enumerate() {
+                            let mid_value = *mid;
+                            let name_clone = name.clone();
+                            let title_clone = title.clone();
+                            let face_clone = face.clone();
+                            writer
+                                .create_element("actor")
+                                .write_inner_content_async::<_, _, Error>(|writer| async move {
+                                    writer
+                                        .create_element("name")
+                                        .write_text_content_async(BytesText::new(&name_clone))
+                                        .await?;
+                                    writer
+                                        .create_element("role")
+                                        .write_text_content_async(BytesText::new(&title_clone))
+                                        .await?;
+                                    if let Some(ref thumb) = face_clone {
+                                        if !thumb.is_empty() {
+                                            writer
+                                                .create_element("thumb")
+                                                .write_text_content_async(BytesText::new(thumb))
+                                                .await?;
+                                        }
+                                    }
+                                    if mid_value > 0 {
+                                        writer
+                                            .create_element("profile")
+                                            .write_text_content_async(BytesText::new(&format!(
+                                                "https://space.bilibili.com/{}",
+                                                mid_value
+                                            )))
+                                            .await?;
+                                    }
+                                    writer
+                                        .create_element("order")
+                                        .write_text_content_async(BytesText::new(&(index + 1).to_string()))
+                                        .await?;
+                                    Ok(writer)
+                                })
+                                .await?;
+                        }
+                    } else {
+                        let actor_info = Self::get_actor_info(episode.upper_id, episode.upper_name, config);
+                        if let Some((actor_name, role_name)) = actor_info {
+                            let upper_id = episode.upper_id;
+                            writer
+                                .create_element("actor")
+                                .write_inner_content_async::<_, _, Error>(|writer| async move {
+                                    writer
+                                        .create_element("name")
+                                        .write_text_content_async(BytesText::new(&actor_name))
+                                        .await?;
+                                    writer
+                                        .create_element("role")
+                                        .write_text_content_async(BytesText::new(&role_name))
+                                        .await?;
+                                    if let Some(thumb) = episode.upper_face_url {
+                                        if !thumb.is_empty() {
+                                            writer
+                                                .create_element("thumb")
+                                                .write_text_content_async(BytesText::new(thumb))
+                                                .await?;
+                                        }
+                                    }
+                                    if upper_id > 0 {
+                                        writer
+                                            .create_element("profile")
+                                            .write_text_content_async(BytesText::new(&format!(
+                                                "https://space.bilibili.com/{}",
+                                                upper_id
+                                            )))
+                                            .await?;
+                                    }
+                                    writer
+                                        .create_element("order")
+                                        .write_text_content_async(BytesText::new("1"))
+                                        .await?;
+                                    Ok(writer)
+                                })
+                                .await?;
+                        }
+                    }
                 }
 
                 // 缩略图（本地文件路径优先）
@@ -1260,11 +1395,7 @@ impl NFO<'_> {
                 }
 
                 // 剧情简介 - 为Season添加季度特定的前缀
-                let season_plot_link = season
-                    .plot_link_override
-                    .clone()
-                    .unwrap_or_else(|| format!("https://www.bilibili.com/video/{}/", season.bvid));
-                let season_plot_base = Self::format_plot_with_link(&season_plot_link, season.bvid, season.intro);
+                let season_plot_base = season.intro.to_string();
                 let season_plot = if Self::is_bangumi_video(season.category) {
                     if let Some(season_title) = Self::extract_season_title_from_full_name(season.name) {
                         format!("【{}】{}", season_title, season_plot_base)
@@ -1324,13 +1455,8 @@ impl NFO<'_> {
                 }
 
                 // 类型标签
-                if let Some(tags) = season.tags {
-                    for tag in tags {
-                        writer
-                            .create_element("genre")
-                            .write_text_content_async(BytesText::new(&tag))
-                            .await?;
-                    }
+                if let Some(ref tags) = season.tags {
+                    Self::write_genre_tags(writer, tags.iter().map(String::as_str), config).await?;
                 }
 
                 // 国家信息
@@ -1557,17 +1683,6 @@ impl NFO<'_> {
             })
             .await?;
         Ok(())
-    }
-
-    #[inline]
-    fn format_plot(bvid: &str, intro: &str) -> String {
-        let url = format!("https://www.bilibili.com/video/{}/", bvid);
-        Self::format_plot_with_link(&url, bvid, intro)
-    }
-
-    #[inline]
-    fn format_plot_with_link(link: &str, link_text: &str, intro: &str) -> String {
-        format!(r#"原始视频：<a href="{}">{}</a><br/><br/>{}"#, link, link_text, intro,)
     }
 
     /// 检测是否为番剧视频（基于 category 字段）
@@ -2223,8 +2338,13 @@ impl<'a> From<&'a page::Model> for Episode<'a> {
             country: None,                             // 使用默认国家
             studio: None,                              // 使用默认制作工作室
             genres: None,                              // 无类型标签
+            upper_id: 0,                               // 默认UP主UID
+            upper_name: "",                            // 默认UP主名称
+            actors_info: None,                         // 默认无演员信息
+            staff_info: None,                          // 默认无联合投稿成员信息
             thumb_url: None,                           // 暂不设置本地路径
             fanart_url: None,                          // 暂不设置本地路径
+            upper_face_url: None,                      // 默认无UP主头像
         }
     }
 }
@@ -2282,8 +2402,17 @@ impl<'a> Episode<'a> {
                 .tags
                 .as_ref()
                 .and_then(|tags| serde_json::from_value(tags.clone()).ok()), // 从视频标签提取类型
+            upper_id: video.upper_id,                                 // UP主UID
+            upper_name: &video.upper_name,                            // UP主名称
+            actors_info: video.actors.clone(),                        // 演员信息
+            staff_info: video.staff_info.as_ref(),                    // 联合投稿成员信息
             thumb_url: None,                                          // 暂不设置本地路径
             fanart_url: None,                                         // 暂不设置本地路径
+            upper_face_url: if !video.upper_face.is_empty() {
+                Some(&video.upper_face)
+            } else {
+                None
+            },
         }
     }
 }
@@ -2524,6 +2653,18 @@ impl<'a> Season<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn render_movie_nfo_with_config(movie: Movie<'_>, config: &NFOConfig) -> String {
+        let mut buffer = Vec::new();
+        let mut tokio_buffer = BufWriter::new(&mut buffer);
+        let writer = Writer::new_with_indent(&mut tokio_buffer, b' ', 4);
+
+        NFO::write_movie_nfo(writer, movie, config).await.unwrap();
+        tokio_buffer.flush().await.unwrap();
+
+        String::from_utf8(buffer).unwrap()
+    }
 
     #[tokio::test]
     async fn test_generate_nfo() {
@@ -2556,6 +2697,8 @@ mod tests {
         assert!(generated_movie.contains("<name>1</name>")); // upper_id=1
         assert!(generated_movie.contains("<role>upper_name</role>"));
         assert!(generated_movie.contains("<thumb>https://example.com/cover.jpg</thumb>"));
+        assert!(!generated_movie.contains("原始视频："));
+        assert!(!generated_movie.contains("https://www.bilibili.com/video/"));
 
         let generated_tvshow = NFO::TVShow((&video).into()).generate_nfo().await.unwrap();
         // 检查TVShow的关键字段
@@ -2569,6 +2712,8 @@ mod tests {
         assert!(generated_tvshow.contains("<name>1</name>")); // upper_id=1
         assert!(generated_tvshow.contains("<role>upper_name</role>"));
         assert!(generated_tvshow.contains("<thumb>https://example.com/cover.jpg</thumb>"));
+        assert!(!generated_tvshow.contains("原始视频："));
+        assert!(!generated_tvshow.contains("https://www.bilibili.com/video/"));
 
         assert_eq!(
             NFO::Upper((&video).into()).generate_nfo().await.unwrap(),
@@ -2597,6 +2742,113 @@ mod tests {
         assert!(generated_episode.contains("<season>1</season>"));
         assert!(generated_episode.contains("<episode>3</episode>"));
         assert!(generated_episode.contains(r#"<uniqueid type="bilibili" default="true">3</uniqueid>"#));
+    }
+
+    #[tokio::test]
+    async fn test_nfo_strips_invalid_xml_control_chars() {
+        let video = video::Model {
+            intro: "简介里有非法字符\u{000b}这里".to_string(),
+            name: "标题\u{000b}异常".to_string(),
+            upper_id: 1,
+            upper_name: "upper\u{000b}name".to_string(),
+            cover: "https://example.com/cover.jpg".to_string(),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2022, 2, 2).unwrap(),
+                chrono::NaiveTime::from_hms_opt(2, 2, 2).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2033, 3, 3).unwrap(),
+                chrono::NaiveTime::from_hms_opt(3, 3, 3).unwrap(),
+            ),
+            bvid: "BV1InvalidXml".to_string(),
+            ..Default::default()
+        };
+
+        let generated_tvshow = NFO::TVShow((&video).into()).generate_nfo().await.unwrap();
+        assert!(!generated_tvshow.contains('\u{000b}'));
+        assert!(generated_tvshow.contains("<title>标题异常</title>"));
+        assert!(generated_tvshow.contains("简介里有非法字符这里"));
+        assert!(generated_tvshow.contains("<name>uppername</name>"));
+
+        let page = page::Model {
+            name: "分页\u{000b}标题".to_string(),
+            pid: 1,
+            ..Default::default()
+        };
+        let generated_episode = NFO::Episode(Episode::from_video_and_page(&video, &page))
+            .generate_nfo()
+            .await
+            .unwrap();
+        assert!(!generated_episode.contains('\u{000b}'));
+        assert!(generated_episode.contains("<title>标题异常 - 分页标题</title>"));
+        assert!(generated_episode.contains("简介里有非法字符这里"));
+    }
+
+    #[tokio::test]
+    async fn test_season_nfo_does_not_embed_original_video_link() {
+        let video = video::Model {
+            intro: "测试简介正文".to_string(),
+            name: "测试合集视频".to_string(),
+            upper_id: 1,
+            upper_name: "测试UP".to_string(),
+            category: 3,
+            season_number: Some(1),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            bvid: "BV1SeasonNoLink".to_string(),
+            ..Default::default()
+        };
+
+        let season = Season::from_video_with_collection(&video, Some("测试合集"), None, 1, Some(2));
+        let season_nfo = NFO::Season(season).generate_nfo().await.unwrap();
+
+        assert!(season_nfo.contains("测试简介正文"));
+        assert!(!season_nfo.contains("原始视频："));
+        assert!(!season_nfo.contains("https://www.bilibili.com/video/"));
+        assert!(!season_nfo.contains("<a href="));
+        assert!(!season_nfo.contains("<br/>"));
+    }
+
+    #[tokio::test]
+    async fn test_episode_nfo_includes_upper_actor_fallback() {
+        let video = video::Model {
+            intro: "测试视频简介".to_string(),
+            name: "测试多P视频".to_string(),
+            upper_id: 5328643,
+            upper_name: "まん酱".to_string(),
+            upper_face: "https://i1.hdslb.com/bfs/face/test-face.jpg".to_string(),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+                chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            ),
+            bvid: "BV1EpisodeActor".to_string(),
+            ..Default::default()
+        };
+
+        let page = page::Model {
+            name: "P01.欣赏版".to_string(),
+            pid: 1,
+            duration: 240,
+            ..Default::default()
+        };
+
+        let generated_episode = NFO::Episode(Episode::from_video_and_page(&video, &page))
+            .generate_nfo()
+            .await
+            .unwrap();
+
+        assert!(generated_episode.contains("<actor>"));
+        assert!(generated_episode.contains("<name>まん酱</name>"));
+        assert!(generated_episode.contains("<role>UP主</role>"));
+        assert!(generated_episode.contains("<thumb>https://i1.hdslb.com/bfs/face/test-face.jpg</thumb>"));
+        assert!(generated_episode.contains("<profile>https://space.bilibili.com/5328643</profile>"));
+        assert!(generated_episode.contains("<order>1</order>"));
     }
 
     #[tokio::test]
@@ -2844,6 +3096,40 @@ mod tests {
         assert_eq!(actor_info, Some(("测试UP主".to_string(), "UP主".to_string())));
 
         println!("空UP主处理策略测试通过");
+    }
+
+    #[tokio::test]
+    async fn test_genre_tags_can_be_disabled() {
+        use crate::config::NFOConfig;
+
+        let video = video::Model {
+            intro: "测试关闭genre标签".to_string(),
+            name: "《名侦探柯南 水平线上的阴谋》".to_string(),
+            upper_id: 0,
+            upper_name: "".to_string(),
+            category: 1,
+            show_season_type: Some(2),
+            favtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2020, 5, 22).unwrap(),
+                chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+            pubtime: chrono::NaiveDateTime::new(
+                chrono::NaiveDate::from_ymd_opt(2020, 5, 22).unwrap(),
+                chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+            bvid: "BV1Hz411q7vB".to_string(),
+            tags: Some(serde_json::json!(["推理", "悬疑"])),
+            ..Default::default()
+        };
+
+        let config = NFOConfig {
+            include_genre: false,
+            ..Default::default()
+        };
+
+        let movie_nfo = render_movie_nfo_with_config(Movie::from(&video), &config).await;
+
+        assert!(!movie_nfo.contains("<genre>"));
     }
 
     #[tokio::test]

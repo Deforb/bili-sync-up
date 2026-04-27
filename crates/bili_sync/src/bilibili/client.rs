@@ -629,6 +629,50 @@ impl BiliClient {
         _page: u32,
         page_size: u32,
     ) -> Result<crate::api::response::UserCollectionsResponse> {
+        let normalized_page_size = page_size.clamp(1, 30);
+        let mut page_size_candidates = vec![normalized_page_size];
+        for fallback_page_size in [20, 10] {
+            if normalized_page_size > fallback_page_size {
+                page_size_candidates.push(fallback_page_size);
+            }
+        }
+
+        let mut last_err = None;
+        for (index, candidate_page_size) in page_size_candidates.iter().copied().enumerate() {
+            let is_final_candidate = index + 1 == page_size_candidates.len();
+            match self
+                .get_user_collections_with_page_size(mid, candidate_page_size, is_final_candidate)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    last_err = Some(err);
+                    if let Some(next_page_size) = page_size_candidates.get(index + 1) {
+                        info!(
+                            "UP主 {} 使用 page_size={} 获取合集失败，将降级重试为 page_size={}",
+                            mid, candidate_page_size, next_page_size
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(ref err) = last_err {
+            warn!(
+                "UP主 {} 获取合集失败，已依次尝试 page_size={:?}: {}",
+                mid, page_size_candidates, err
+            );
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("获取合集失败")))
+    }
+
+    async fn get_user_collections_with_page_size(
+        &self,
+        mid: i64,
+        page_size: u32,
+        emit_warning: bool,
+    ) -> Result<crate::api::response::UserCollectionsResponse> {
         use serde_json::Value;
 
         // 同时获取合集(seasons)和系列(series)
@@ -640,69 +684,61 @@ impl BiliClient {
         let mut total_count = 0u32;
 
         loop {
-            let mut retry_count = 0;
-            let max_retries = 2;
-
-            // 添加重试机制获取当前页数据
-            let seasons_response = loop {
-                let mid_str = mid.to_string();
-                let page_num_str = current_page.to_string();
-                let page_size_str = page_size.to_string();
-                let web_location = "333.1387".to_string();
-                match self
-                    .request(Method::GET, seasons_url)
-                    .await
-                    .query(&[
-                        ("mid", &mid_str),
-                        ("page_num", &page_num_str),
-                        ("page_size", &page_size_str),
-                        ("web_location", &web_location),
-                    ])
-                    .send()
-                    .await
-                {
-                    Ok(response) => match response.error_for_status() {
-                        Ok(response) => match response.json::<Value>().await {
-                            Ok(json) => match json.validate() {
-                                Ok(validated) => break validated,
-                                Err(e) => {
-                                    warn!("UP主 {} 合集响应验证失败: {}", mid, e);
-                                    if retry_count >= max_retries {
-                                        return Err(e.context("合集响应验证失败"));
-                                    }
-                                }
-                            },
+            let mid_str = mid.to_string();
+            let page_num_str = current_page.to_string();
+            let page_size_str = page_size.to_string();
+            let web_location = "333.1387".to_string();
+            let seasons_response = match self
+                .request(Method::GET, seasons_url)
+                .await
+                .query(&[
+                    ("mid", &mid_str),
+                    ("page_num", &page_num_str),
+                    ("page_size", &page_size_str),
+                    ("web_location", &web_location),
+                ])
+                .send()
+                .await
+            {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => match response.json::<Value>().await {
+                        Ok(json) => match json.validate() {
+                            Ok(validated) => validated,
                             Err(e) => {
-                                warn!("UP主 {} 合集JSON解析失败: {}", mid, e);
-                                if retry_count >= max_retries {
-                                    return Err(anyhow!("解析合集响应JSON失败: {}", e));
+                                if emit_warning {
+                                    warn!("UP主 {} 合集响应验证失败: {}", mid, e);
+                                } else {
+                                    info!("UP主 {} 合集响应验证失败: {}", mid, e);
                                 }
+                                return Err(e.context("合集响应验证失败"));
                             }
                         },
                         Err(e) => {
-                            warn!("UP主 {} 合集请求状态错误: {}", mid, e);
-                            if retry_count >= max_retries {
-                                return Err(anyhow!("合集请求返回错误状态: {}", e));
+                            if emit_warning {
+                                warn!("UP主 {} 合集JSON解析失败: {}", mid, e);
+                            } else {
+                                info!("UP主 {} 合集JSON解析失败: {}", mid, e);
                             }
+                            return Err(anyhow!("解析合集响应JSON失败: {}", e));
                         }
                     },
                     Err(e) => {
-                        warn!(
-                            "UP主 {} 合集请求失败 (重试 {}/{}): {}",
-                            mid,
-                            retry_count + 1,
-                            max_retries + 1,
-                            e
-                        );
-                        if retry_count >= max_retries {
-                            return Err(anyhow!("发送合集请求失败: {}", e));
+                        if emit_warning {
+                            warn!("UP主 {} 合集请求状态错误: {}", mid, e);
+                        } else {
+                            info!("UP主 {} 合集请求状态错误: {}", mid, e);
                         }
+                        return Err(anyhow!("合集请求返回错误状态: {}", e));
                     }
+                },
+                Err(e) => {
+                    if emit_warning {
+                        warn!("UP主 {} 合集请求失败: {}", mid, e);
+                    } else {
+                        info!("UP主 {} 合集请求失败: {}", mid, e);
+                    }
+                    return Err(anyhow!("发送合集请求失败: {}", e));
                 }
-
-                retry_count += 1;
-                // 重试前等待
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             };
 
             // 检查响应是否包含items_lists字段

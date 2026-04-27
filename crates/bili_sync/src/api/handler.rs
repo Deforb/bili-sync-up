@@ -45,7 +45,8 @@ use crate::api::response::{
     HotReloadStatusResponse, InitialSetupCheckResponse, MonitoringStatus, PageInfo, QRGenerateResponse, QRPollResponse,
     QRUserInfo, RefreshDanmakuResponse, ResetAllVideosResponse, ResetVideoResponse, ResetVideoSourcePathResponse,
     SetupAuthTokenResponse, SubmissionVideosResponse, UpdateConfigResponse, UpdateCredentialResponse,
-    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourcesResponse, VideosResponse,
+    UpdateVideoStatusResponse, VideoInfo, VideoResponse, VideoSource, VideoSourceTag, VideoSourcesResponse,
+    VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse};
 use crate::utils::live_updates::{
@@ -73,6 +74,48 @@ type VideoListRow = (
     Option<String>,
     Option<i32>,
 );
+
+fn is_invalid_video_placeholder_title(name: &str) -> bool {
+    matches!(name.trim(), "" | "已失效视频" | "失效视频")
+}
+
+fn title_from_local_file_path(path: &str) -> Option<String> {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())?;
+
+    let trimmed = stem.trim();
+    if is_invalid_video_placeholder_title(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn fallback_invalid_video_title(page_name: &str, page_path: Option<&str>) -> Option<String> {
+    let page_name = page_name.trim();
+    if !is_invalid_video_placeholder_title(page_name) {
+        return Some(page_name.to_string());
+    }
+
+    page_path.and_then(title_from_local_file_path)
+}
+
+fn apply_invalid_video_title_fallback(video_info: &mut VideoInfo, fallback_title: Option<String>) {
+    if video_info.valid || !is_invalid_video_placeholder_title(&video_info.name) {
+        return;
+    }
+
+    if let Some(fallback_title) = fallback_title {
+        debug!(
+            "失效视频标题使用本地分页信息兜底: video_id={}, bvid={}, old_name={}, new_name={}",
+            video_info.id, video_info.bvid, video_info.name, fallback_title
+        );
+        video_info.name = fallback_title;
+    }
+}
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -585,63 +628,6 @@ fn cleanup_empty_parent_dirs(deleted_path: &str, stop_at: &str) {
     }
 }
 
-/// 递归清理基础目录下已空的子目录。
-///
-/// 用于处理“先批量删除视频，再删除视频源”时遗留的上层空目录。
-/// 这类目录已经不再对应任何视频根目录，无法再通过单次视频删除回收。
-fn cleanup_empty_subdirs_under(base_path: &str) {
-    use std::fs;
-    use std::path::PathBuf;
-
-    let base_norm = normalize_file_path(base_path).trim_end_matches('/').to_string();
-    if base_norm.is_empty() || is_dangerous_path_for_deletion(&base_norm) {
-        return;
-    }
-
-    let base = PathBuf::from(&base_norm);
-    if !base.exists() || !base.is_dir() {
-        return;
-    }
-
-    let mut dirs = Vec::new();
-    let mut stack = vec![base.clone()];
-    while let Some(current) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&current) else {
-            continue;
-        };
-
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path.clone());
-                dirs.push(path);
-            }
-        }
-    }
-
-    dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-
-    for dir in dirs {
-        let dir_str = dir.to_string_lossy().to_string();
-        let dir_norm = normalize_file_path(&dir_str).trim_end_matches('/').to_string();
-        if dir_norm == base_norm {
-            continue;
-        }
-
-        match fs::read_dir(&dir) {
-            Ok(mut entries) => {
-                if entries.next().is_none() {
-                    match fs::remove_dir(&dir) {
-                        Ok(_) => info!("清理空子目录: {}", dir_str),
-                        Err(e) => warn!("无法删除空子目录 {}: {}", dir_str, e),
-                    }
-                }
-            }
-            Err(e) => warn!("无法读取子目录 {}: {}", dir_str, e),
-        }
-    }
-}
-
 async fn collect_video_source_base_paths(
     conn: &impl ConnectionTrait,
     video: &video::Model,
@@ -793,6 +779,9 @@ mod cleanup_tests {
 #[cfg(test)]
 mod reset_path_tests {
     use super::*;
+    use chrono::DateTime;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn remap_page_path_preserves_multipage_subdirectories_and_extension() {
@@ -831,6 +820,136 @@ mod reset_path_tests {
             remapped.as_deref(),
             Some(r"G:\library\收藏夹\合集A\Season 01\S01E001 - 测试页.m4a")
         );
+    }
+
+    fn sample_video_model(path: String) -> video::Model {
+        let test_time = DateTime::from_timestamp(1_640_995_200, 0).unwrap().naive_utc();
+        video::Model {
+            id: 1,
+            collection_id: None,
+            favorite_id: None,
+            watch_later_id: Some(1),
+            submission_id: None,
+            source_id: None,
+            source_type: None,
+            upper_id: 1000,
+            upper_name: "测试UP".to_string(),
+            upper_face: String::new(),
+            staff_info: None,
+            source_submission_id: None,
+            name: "测试视频".to_string(),
+            path,
+            category: 1,
+            bvid: "BV1xx411c7mD".to_string(),
+            intro: String::new(),
+            cover: String::new(),
+            ctime: test_time,
+            pubtime: test_time,
+            favtime: test_time,
+            download_status: 0,
+            valid: true,
+            tags: None,
+            single_page: Some(true),
+            created_at: "2026-04-20 00:00:00".to_string(),
+            season_id: None,
+            submission_membership_state: 0,
+            submission_membership_checked_at: None,
+            ep_id: None,
+            season_number: None,
+            episode_number: None,
+            deleted: 0,
+            share_copy: None,
+            show_season_type: None,
+            actors: None,
+            auto_download: false,
+            cid: None,
+            is_charge_video: false,
+            charge_can_play: false,
+            total_file_size_bytes: None,
+        }
+    }
+
+    fn sample_page_model(video_id: i32, path: String) -> page::Model {
+        page::Model {
+            id: 1,
+            video_id,
+            cid: 1,
+            pid: 1,
+            name: "P1".to_string(),
+            width: None,
+            height: None,
+            duration: 60,
+            path: Some(path),
+            file_size_bytes: None,
+            video_stream_size_bytes: None,
+            audio_stream_size_bytes: None,
+            image: None,
+            download_status: 31,
+            created_at: "2026-04-20 00:00:00".to_string(),
+            play_video_streams: None,
+            play_audio_streams: None,
+            play_subtitle_streams: None,
+            play_streams_updated_at: None,
+            danmaku_last_synced_at: None,
+            danmaku_sync_generation: 0,
+            danmaku_cid_snapshot: None,
+            danmaku_last_write_count: 0,
+            ai_renamed: None,
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("bili-sync-reset-path-{prefix}-{}", uuid::Uuid::new_v4()));
+        dir
+    }
+
+    #[tokio::test]
+    async fn move_flat_folder_video_files_moves_media_and_sidecars_into_new_base() {
+        let root = unique_temp_dir("flat-folder");
+        let old_base = root.join("downloads");
+        let new_base = old_base.join("稍后观看");
+        fs::create_dir_all(&old_base).expect("应能创建旧目录");
+
+        let page_file = old_base.join("2026-04-20-BV1xx411c7mD-测试视频.mp4");
+        let nfo_file = old_base.join("2026-04-20-BV1xx411c7mD-测试视频.nfo");
+        let thumb_file = old_base.join("2026-04-20-BV1xx411c7mD-测试视频-thumb.jpg");
+        fs::write(&page_file, b"video").expect("应能写入视频文件");
+        fs::write(&nfo_file, b"nfo").expect("应能写入nfo文件");
+        fs::write(&thumb_file, b"thumb").expect("应能写入封面文件");
+
+        let video = sample_video_model(old_base.to_string_lossy().to_string());
+        let pages = vec![sample_page_model(1, page_file.to_string_lossy().to_string())];
+
+        let (moved_count, cleaned_count) = move_flat_folder_video_files_to_new_path(
+            &video,
+            &pages,
+            &old_base.to_string_lossy(),
+            &new_base.to_string_lossy(),
+            true,
+        )
+        .await
+        .expect("平铺目录迁移应成功");
+
+        assert_eq!(moved_count, 3, "应移动主文件和配套文件");
+        assert_eq!(cleaned_count, 0, "目标目录在旧目录里面时不应清空旧根目录");
+        assert!(!page_file.exists(), "旧位置主文件应已移走");
+        assert!(!nfo_file.exists(), "旧位置nfo应已移走");
+        assert!(!thumb_file.exists(), "旧位置封面应已移走");
+        assert!(
+            new_base.join("2026-04-20-BV1xx411c7mD-测试视频.mp4").exists(),
+            "新目录应有视频文件"
+        );
+        assert!(
+            new_base.join("2026-04-20-BV1xx411c7mD-测试视频.nfo").exists(),
+            "新目录应有nfo文件"
+        );
+        assert!(
+            new_base.join("2026-04-20-BV1xx411c7mD-测试视频-thumb.jpg").exists(),
+            "新目录应有封面文件"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
@@ -1336,10 +1455,7 @@ mod queue_sse_tests {
     #[test]
     fn test_normalize_video_source_latest_row_at_filters_initial_value() {
         assert_eq!(normalize_video_source_latest_row_at(""), None);
-        assert_eq!(
-            normalize_video_source_latest_row_at("1970-01-01 00:00:00"),
-            None
-        );
+        assert_eq!(normalize_video_source_latest_row_at("1970-01-01 00:00:00"), None);
         assert_eq!(
             normalize_video_source_latest_row_at("2026-04-14 12:34:56"),
             Some("2026-04-14 12:34:56".to_string())
@@ -1349,7 +1465,7 @@ mod queue_sse_tests {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_video_sources, get_videos, get_video, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
+    paths(get_video_sources, get_videos, get_video, get_video_local_cover, refresh_video_danmaku, refresh_page_danmaku, reset_video, reset_all_videos, reset_specific_tasks, update_video_status, add_video_source, update_video_source_enabled, update_video_source_scan_deleted, update_video_source_scan_deleted_once, reset_video_source_path, delete_video_source, reload_config, get_config, update_config, get_bangumi_seasons, search_bilibili, get_user_favorites, get_user_collections, get_user_followings, get_subscribed_collections, get_submission_videos, get_logs, get_queue_status, cancel_queue_task, proxy_image, get_config_item, get_config_history, get_config_migration_status, migrate_config_schema, validate_config, get_hot_reload_status, check_initial_setup, setup_auth_token, update_credential, generate_qr_code, poll_qr_status, get_current_user, clear_credential, pause_scanning_endpoint, resume_scanning_endpoint, get_task_control_status, get_video_play_info, proxy_video_stream, validate_favorite, get_user_favorites_by_uid, get_latest_ingests, get_recent_ingests, test_notification_handler, get_notification_config, update_notification_config, get_notification_status, test_risk_control_handler, get_beta_image_update_status),
     modifiers(&OpenAPIAuth),
     security(
         ("Token" = []),
@@ -2131,6 +2247,42 @@ pub async fn get_videos(
                 )
                 .collect();
 
+            let invalid_placeholder_video_ids = videos
+                .iter()
+                .filter(|video| !video.valid && is_invalid_video_placeholder_title(&video.name))
+                .map(|video| video.id)
+                .collect::<Vec<_>>();
+
+            if !invalid_placeholder_video_ids.is_empty() {
+                let fallback_rows = page::Entity::find()
+                    .filter(page::Column::VideoId.is_in(invalid_placeholder_video_ids))
+                    .order_by_asc(page::Column::VideoId)
+                    .order_by_asc(page::Column::Pid)
+                    .select_only()
+                    .columns([page::Column::VideoId, page::Column::Name, page::Column::Path])
+                    .into_tuple::<(i32, String, Option<String>)>()
+                    .all(db.as_ref())
+                    .await?;
+                let mut title_fallbacks = HashMap::new();
+                for (video_id, page_name, page_path) in fallback_rows {
+                    if title_fallbacks.contains_key(&video_id) {
+                        continue;
+                    }
+                    if let Some(title) =
+                        fallback_invalid_video_title(&page_name, page_path.as_deref())
+                    {
+                        title_fallbacks.insert(video_id, title);
+                    }
+                }
+
+                for video in &mut videos {
+                    apply_invalid_video_title_fallback(
+                        video,
+                        title_fallbacks.get(&video.id).cloned(),
+                    );
+                }
+            }
+
             // 为番剧类型的视频填充真实标题
             for (
                 i,
@@ -2370,6 +2522,84 @@ async fn build_queue_status_sse_event(last_snapshot: &mut String) -> Option<Even
     }
 }
 
+fn build_video_source_tag(
+    source_id: i32,
+    source_type: &str,
+    source_type_label: &str,
+    source_name: String,
+) -> VideoSourceTag {
+    VideoSourceTag {
+        source_id,
+        source_type: source_type.to_string(),
+        source_type_label: source_type_label.to_string(),
+        source_name,
+    }
+}
+
+async fn resolve_video_source_tag(
+    db: &DatabaseConnection,
+    video: &video::Model,
+) -> Result<Option<VideoSourceTag>> {
+    if video.source_type == Some(1) {
+        if let Some(source_id) = video.source_id {
+            let source_name = video_source::Entity::find_by_id(source_id)
+                .one(db)
+                .await?
+                .map(|source| source.name)
+                .unwrap_or_else(|| format!("已删除番剧源 #{}", source_id));
+            return Ok(Some(build_video_source_tag(source_id, "bangumi", "番剧", source_name)));
+        }
+    }
+
+    if let Some(source_id) = video.collection_id {
+        let source_name = collection::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.name)
+            .unwrap_or_else(|| format!("已删除合集源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "collection",
+            "合集 / 列表",
+            source_name,
+        )));
+    }
+
+    if let Some(source_id) = video.favorite_id {
+        let source_name = favorite::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.name)
+            .unwrap_or_else(|| format!("已删除收藏夹源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(source_id, "favorite", "收藏夹", source_name)));
+    }
+
+    if let Some(source_id) = video.submission_id {
+        let source_name = submission::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|source| source.upper_name)
+            .unwrap_or_else(|| format!("已删除投稿源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(source_id, "submission", "UP主投稿", source_name)));
+    }
+
+    if let Some(source_id) = video.watch_later_id {
+        let source_name = watch_later::Entity::find_by_id(source_id)
+            .one(db)
+            .await?
+            .map(|_| "稍后再看".to_string())
+            .unwrap_or_else(|| format!("已删除稍后再看源 #{}", source_id));
+        return Ok(Some(build_video_source_tag(
+            source_id,
+            "watch_later",
+            "稍后再看",
+            source_name,
+        )));
+    }
+
+    Ok(None)
+}
+
 #[utoipa::path(
     get,
     path = "/api/videos/{id}",
@@ -2381,75 +2611,28 @@ pub async fn get_video(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<VideoResponse>, ApiError> {
-    let raw_video = video::Entity::find_by_id(id)
-        .select_only()
-        .columns([
-            video::Column::Id,
-            video::Column::Bvid,
-            video::Column::Name,
-            video::Column::UpperName,
-            video::Column::Path,
-            video::Column::Category,
-            video::Column::DownloadStatus,
-            video::Column::Cover,
-            video::Column::Valid,
-            video::Column::IsChargeVideo,
-            video::Column::SeasonId,
-            video::Column::SourceType,
-        ])
-        .into_tuple::<(
-            i32,
-            String,
-            String,
-            String,
-            String,
-            i32,
-            u32,
-            String,
-            bool,
-            bool,
-            Option<String>,
-            Option<i32>,
-        )>()
-        .one(db.as_ref())
-        .await?;
-
-    let Some((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
-        season_id,
-        source_type,
-    )) = raw_video
-    else {
+    let Some(raw_video) = video::Entity::find_by_id(id).one(db.as_ref()).await? else {
         return Err(InnerApiError::NotFound(id).into());
     };
 
     // 创建VideoInfo并填充bangumi_title
     let mut video_info = VideoInfo::from((
-        _id,
-        bvid,
-        name,
-        upper_name,
-        path,
-        category,
-        download_status,
-        cover,
-        valid,
-        is_charge_video,
+        raw_video.id,
+        raw_video.bvid.clone(),
+        raw_video.name.clone(),
+        raw_video.upper_name.clone(),
+        raw_video.path.clone(),
+        raw_video.category,
+        raw_video.download_status,
+        raw_video.cover.clone(),
+        raw_video.valid,
+        raw_video.is_charge_video,
     ));
 
     // 为番剧类型的视频填充真实标题
-    if source_type == Some(1) && season_id.is_some() {
+    if raw_video.source_type == Some(1) && raw_video.season_id.is_some() {
         // 番剧类型且有season_id，尝试获取真实标题
-        if let Some(ref season_id_str) = season_id {
+        if let Some(ref season_id_str) = raw_video.season_id {
             // 先从缓存获取
             if let Some(title) = get_cached_season_title(season_id_str).await {
                 video_info.bangumi_title = Some(title);
@@ -2461,6 +2644,7 @@ pub async fn get_video(
             }
         }
     }
+    let source = resolve_video_source_tag(db.as_ref(), &raw_video).await?;
     let pages = page::Entity::find()
         .filter(page::Column::VideoId.eq(id))
         .order_by_asc(page::Column::Pid)
@@ -2491,10 +2675,17 @@ pub async fn get_video(
         .await?
         .into_iter()
         .map(PageInfo::from)
-        .collect();
+        .collect::<Vec<_>>();
+
+    let detail_title_fallback = pages
+        .iter()
+        .find_map(|page| fallback_invalid_video_title(&page.name, page.path.as_deref()));
+    apply_invalid_video_title_fallback(&mut video_info, detail_title_fallback);
+
     Ok(ApiResponse::ok(VideoResponse {
         video: video_info,
         pages,
+        source,
     }))
 }
 
@@ -2512,15 +2703,33 @@ pub async fn refresh_video_danmaku(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<RefreshDanmakuResponse>, ApiError> {
-    let config = crate::config::reload_config();
-    let bili_client = crate::bilibili::BiliClient::new(String::new());
-    let refreshed_pages =
-        crate::workflow_danmaku::refresh_danmaku_for_video(id, &bili_client, db.as_ref(), &config).await?;
+    let (refreshed_pages, message) = if crate::task::is_scanning() {
+        let task = crate::task::RefreshDanmakuTask {
+            video_id: Some(id),
+            page_id: None,
+            task_id: uuid::Uuid::new_v4().to_string(),
+        };
+        crate::task::enqueue_refresh_danmaku_task(task, db.as_ref()).await?;
+        (
+            0,
+            "当前正在扫描，已加入弹幕刷新队列，扫描结束后会按现有下载状态流处理".to_string(),
+        )
+    } else {
+        let refreshed_pages = crate::workflow_danmaku::schedule_video_danmaku_refresh(db.as_ref(), id).await?;
+        crate::task::resume_scanning();
+        (
+            refreshed_pages,
+            format!(
+                "已将 {} 个分页的弹幕标记为待刷新，下一轮扫描会按现有下载流程处理",
+                refreshed_pages
+            ),
+        )
+    };
 
     Ok(ApiResponse::ok(RefreshDanmakuResponse {
         success: true,
         refreshed_pages,
-        message: format!("已刷新 {} 个分页的弹幕", refreshed_pages),
+        message,
     }))
 }
 
@@ -2538,15 +2747,30 @@ pub async fn refresh_page_danmaku(
     Path(id): Path<i32>,
     Extension(db): Extension<Arc<DatabaseConnection>>,
 ) -> Result<ApiResponse<RefreshDanmakuResponse>, ApiError> {
-    let config = crate::config::reload_config();
-    let bili_client = crate::bilibili::BiliClient::new(String::new());
-    let refreshed_pages =
-        crate::workflow_danmaku::refresh_danmaku_for_page(id, &bili_client, db.as_ref(), &config).await?;
+    let (refreshed_pages, message) = if crate::task::is_scanning() {
+        let task = crate::task::RefreshDanmakuTask {
+            video_id: None,
+            page_id: Some(id),
+            task_id: uuid::Uuid::new_v4().to_string(),
+        };
+        crate::task::enqueue_refresh_danmaku_task(task, db.as_ref()).await?;
+        (
+            0,
+            "当前正在扫描，已加入弹幕刷新队列，扫描结束后会按现有下载状态流处理".to_string(),
+        )
+    } else {
+        let refreshed_pages = crate::workflow_danmaku::schedule_page_danmaku_refresh(db.as_ref(), id).await?;
+        crate::task::resume_scanning();
+        (
+            refreshed_pages,
+            "已将当前分页的弹幕标记为待刷新，下一轮扫描会按现有下载流程处理".to_string(),
+        )
+    };
 
     Ok(ApiResponse::ok(RefreshDanmakuResponse {
         success: true,
         refreshed_pages,
-        message: "已刷新当前分页的弹幕".to_string(),
+        message,
     }))
 }
 
@@ -3733,7 +3957,7 @@ pub async fn add_video_source_internal(
                         })
                         .unwrap_or_default();
                     let client = crate::bilibili::BiliClient::new(cookie);
-                    match get_collection_cover_from_api(up_id, s_id, &client).await {
+                    match get_collection_cover_from_api(up_id, s_id, collection_type, &client).await {
                         Ok(cover) => {
                             info!("成功从API获取合集「{}」封面: {}", collection_name, cover);
                             Some(cover)
@@ -4696,9 +4920,10 @@ pub async fn delete_video_source(
     let delete_queue_busy = crate::task::DELETE_TASK_QUEUE.is_processing();
     let has_pending_delete_tasks = crate::task::DELETE_TASK_QUEUE.queue_length().await > 0;
     let scanning = crate::task::is_scanning();
+    let task_running = crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running();
 
     // 扫描中、删除处理中，或已有待删任务时：统一入队，避免并发删除触发 database is locked。
-    if scanning || delete_queue_busy || has_pending_delete_tasks {
+    if scanning || task_running || delete_queue_busy || has_pending_delete_tasks {
         if crate::task::DELETE_TASK_QUEUE
             .has_pending_delete_task(source_type.as_str(), id, &db)
             .await?
@@ -4723,6 +4948,15 @@ pub async fn delete_video_source(
 
         if scanning {
             info!("检测到正在扫描，删除任务已加入队列等待处理: {} ID={}", source_type, id);
+            if !crate::task::DELETE_TASK_QUEUE.is_processing() {
+                schedule_delete_tasks_after_active_work_finishes(db.clone());
+            }
+        } else if task_running {
+            info!("检测到后台任务仍在运行，删除任务已加入队列等待处理: {} ID={}", source_type, id);
+
+            if !crate::task::DELETE_TASK_QUEUE.is_processing() {
+                schedule_delete_tasks_after_active_work_finishes(db.clone());
+            }
         } else {
             info!(
                 "检测到删除任务正在执行/排队，删除任务已加入队列等待处理: {} ID={}",
@@ -4745,6 +4979,8 @@ pub async fn delete_video_source(
             source_type,
             message: if scanning {
                 "正在扫描中，删除任务已加入队列，将在扫描完成后自动处理".to_string()
+            } else if task_running {
+                "后台任务仍在结束中，删除任务已加入队列，将在当前任务结束后自动处理".to_string()
             } else {
                 "删除任务已加入队列，正在按顺序处理".to_string()
             },
@@ -4758,17 +4994,18 @@ pub async fn delete_video_source(
         delete_local_files,
         task_id: "direct-delete".to_string(),
     };
-    crate::task::DELETE_TASK_QUEUE.set_processing(true);
+    let delete_processing_guard = crate::task::DELETE_TASK_QUEUE.processing_guard();
     crate::task::DELETE_TASK_QUEUE
         .set_current_task(Some(direct_delete_task))
         .await;
     let direct_delete_result =
         delete_video_source_internal(db.clone(), source_type.clone(), id, delete_local_files).await;
     crate::task::DELETE_TASK_QUEUE.set_current_task(None).await;
-    crate::task::DELETE_TASK_QUEUE.set_processing(false);
+    drop(delete_processing_guard);
 
     // 直删期间若有新请求入队，立即后台处理，避免堆积到下一轮扫描。
     if !crate::task::is_scanning()
+        && !crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running()
         && crate::task::DELETE_TASK_QUEUE.queue_length().await > 0
         && !crate::task::DELETE_TASK_QUEUE.is_processing()
     {
@@ -4862,7 +5099,18 @@ pub async fn delete_video(
         crate::task::enqueue_video_delete_task(delete_task, &db).await?;
 
         if scanning || task_running {
-            info!("检测到扫描任务正在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+            if scanning {
+                info!("检测到扫描任务正在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+                if !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing() {
+                    schedule_video_delete_tasks_after_active_work_finishes(db.clone());
+                }
+            } else {
+                info!("检测到后台任务仍在运行，视频删除任务已加入队列等待处理: 视频ID={}", id);
+
+                if !crate::task::VIDEO_DELETE_TASK_QUEUE.is_processing() {
+                    schedule_video_delete_tasks_after_active_work_finishes(db.clone());
+                }
+            }
         } else {
             info!(
                 "检测到视频删除任务正在执行/排队，视频删除任务已加入队列等待处理: 视频ID={}",
@@ -4882,8 +5130,10 @@ pub async fn delete_video(
         return Ok(ApiResponse::ok(crate::api::response::DeleteVideoResponse {
             success: true,
             video_id: id,
-            message: if scanning || task_running {
+            message: if scanning {
                 "正在扫描中，视频删除任务已加入队列，将在扫描完成后自动处理".to_string()
+            } else if task_running {
+                "后台任务仍在结束中，视频删除任务已加入队列，将在当前任务结束后自动处理".to_string()
             } else {
                 "视频删除任务已加入队列，正在按顺序处理".to_string()
             },
@@ -4891,9 +5141,9 @@ pub async fn delete_video(
     }
 
     // 没有扫描且没有在执行/排队：直接执行删除，并标记“删除处理中”状态。
-    crate::task::VIDEO_DELETE_TASK_QUEUE.set_processing(true);
+    let video_delete_processing_guard = crate::task::VIDEO_DELETE_TASK_QUEUE.processing_guard();
     let direct_delete_result = delete_video_internal(db.clone(), id).await;
-    crate::task::VIDEO_DELETE_TASK_QUEUE.set_processing(false);
+    drop(video_delete_processing_guard);
 
     // 直删期间若有新请求入队，立即后台处理，避免等待下一轮扫描。
     if !crate::task::is_scanning()
@@ -5186,6 +5436,13 @@ pub(crate) struct LocalSourceCleanupPlan {
     pages_by_video_id: HashMap<i32, Vec<page::Model>>,
 }
 
+#[derive(Debug, Clone)]
+struct OrphanVideoCleanupPlan {
+    log_name: String,
+    orphaned_videos: Vec<video::Model>,
+    pages_by_video_id: HashMap<i32, Vec<page::Model>>,
+}
+
 pub(crate) async fn build_local_source_cleanup_plan(
     conn: &impl ConnectionTrait,
     log_name: String,
@@ -5213,6 +5470,32 @@ pub(crate) async fn build_local_source_cleanup_plan(
         base_path,
         base_dir_label,
         flat_folder,
+        orphaned_videos: orphaned_videos.to_vec(),
+        pages_by_video_id,
+    })
+}
+
+async fn build_orphan_video_cleanup_plan(
+    conn: &impl ConnectionTrait,
+    log_name: String,
+    orphaned_videos: &[video::Model],
+) -> Result<OrphanVideoCleanupPlan, ApiError> {
+    let video_ids: Vec<i32> = orphaned_videos.iter().map(|video| video.id).collect();
+    let mut pages_by_video_id: HashMap<i32, Vec<page::Model>> = HashMap::new();
+
+    if !video_ids.is_empty() {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.is_in(video_ids))
+            .all(conn)
+            .await?;
+
+        for page in pages {
+            pages_by_video_id.entry(page.video_id).or_default().push(page);
+        }
+    }
+
+    Ok(OrphanVideoCleanupPlan {
+        log_name,
         orphaned_videos: orphaned_videos.to_vec(),
         pages_by_video_id,
     })
@@ -5552,6 +5835,27 @@ pub(crate) async fn execute_local_source_cleanup_plan(conn: &impl ConnectionTrai
     cleanup_empty_dir_if_empty(&base_path, base_dir_label);
 }
 
+async fn execute_orphan_video_cleanup_plan(conn: &impl ConnectionTrait, plan: OrphanVideoCleanupPlan) {
+    if plan.orphaned_videos.is_empty() {
+        info!("{} 没有找到需要删除的本地文件", plan.log_name);
+        return;
+    }
+
+    info!("开始删除{}残留孤儿视频的本地文件", plan.log_name);
+    let mut deleted_files = 0usize;
+
+    for video in &plan.orphaned_videos {
+        let pages = plan.pages_by_video_id.get(&video.id).map(Vec::as_slice).unwrap_or(&[]);
+
+        match delete_video_files_from_video_and_pages(conn, video, pages).await {
+            Ok(count) => deleted_files += count,
+            Err(e) => warn!("删除残留孤儿视频文件失败: video_id={} - {:?}", video.id, e),
+        }
+    }
+
+    info!("{} 残留孤儿视频本地文件删除完成，共删除 {} 个文件", plan.log_name, deleted_files);
+}
+
 async fn delete_orphaned_videos_from_db(
     conn: &impl ConnectionTrait,
     orphaned_videos: &[video::Model],
@@ -5574,6 +5878,201 @@ async fn delete_orphaned_videos_from_db(
 }
 
 /// 内部删除视频源函数（用于队列处理和直接调用）
+fn is_supported_delete_video_source_type(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "collection" | "favorite" | "submission" | "watch_later" | "bangumi"
+    )
+}
+
+fn delete_video_source_missing_message(source_type: &str) -> String {
+    match source_type {
+        "collection" => "未找到指定的合集".to_string(),
+        "favorite" => "未找到指定的收藏夹".to_string(),
+        "submission" => "未找到指定的UP主投稿".to_string(),
+        "watch_later" => "未找到指定的稍后再看".to_string(),
+        "bangumi" => "未找到指定的番剧".to_string(),
+        _ => format!("不支持的视频源类型: {}", source_type),
+    }
+}
+
+async fn delete_video_source_record_exists(
+    db: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+) -> Result<bool> {
+    match source_type {
+        "collection" => Ok(collection::Entity::find_by_id(id).one(db).await?.is_some()),
+        "favorite" => Ok(favorite::Entity::find_by_id(id).one(db).await?.is_some()),
+        "submission" => Ok(submission::Entity::find_by_id(id).one(db).await?.is_some()),
+        "watch_later" => Ok(watch_later::Entity::find_by_id(id).one(db).await?.is_some()),
+        "bangumi" => Ok(video_source::Entity::find_by_id(id).one(db).await?.is_some()),
+        _ => Err(anyhow!("不支持的视频源类型: {}", source_type)),
+    }
+}
+
+async fn find_videos_by_source_relation(
+    conn: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+) -> Result<Vec<video::Model>> {
+    let query = match source_type {
+        "collection" => video::Entity::find().filter(video::Column::CollectionId.eq(id)),
+        "favorite" => video::Entity::find().filter(video::Column::FavoriteId.eq(id)),
+        "submission" => video::Entity::find().filter(video::Column::SubmissionId.eq(id)),
+        "watch_later" => video::Entity::find().filter(video::Column::WatchLaterId.eq(id)),
+        "bangumi" => video::Entity::find()
+            .filter(video::Column::SourceId.eq(id))
+            .filter(video::Column::SourceType.eq(1)),
+        _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
+    };
+
+    Ok(query.all(conn).await?)
+}
+
+async fn clear_video_source_relation(conn: &impl ConnectionTrait, source_type: &str, id: i32) -> Result<()> {
+    match source_type {
+        "collection" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::CollectionId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::CollectionId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "favorite" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::FavoriteId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::FavoriteId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "submission" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::SubmissionId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::SubmissionId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "watch_later" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::WatchLaterId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::WatchLaterId.eq(id))
+                .exec(conn)
+                .await?;
+        }
+        "bangumi" => {
+            video::Entity::update_many()
+                .col_expr(
+                    video::Column::SourceId,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .col_expr(
+                    video::Column::SourceType,
+                    sea_orm::sea_query::Expr::value(sea_orm::Value::Int(None)),
+                )
+                .filter(video::Column::SourceId.eq(id))
+                .filter(video::Column::SourceType.eq(1))
+                .exec(conn)
+                .await?;
+        }
+        _ => return Err(anyhow!("不支持的视频源类型: {}", source_type)),
+    }
+
+    Ok(())
+}
+
+async fn find_orphaned_videos_by_ids(conn: &impl ConnectionTrait, video_ids: Vec<i32>) -> Result<Vec<video::Model>> {
+    if video_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(video::Entity::find()
+        .filter(video::Column::Id.is_in(video_ids))
+        .filter(
+            video::Column::CollectionId
+                .is_null()
+                .and(video::Column::FavoriteId.is_null())
+                .and(video::Column::WatchLaterId.is_null())
+                .and(video::Column::SubmissionId.is_null())
+                .and(video::Column::SourceId.is_null()),
+        )
+        .all(conn)
+        .await?)
+}
+
+async fn cleanup_missing_video_source_references(
+    conn: &impl ConnectionTrait,
+    source_type: &str,
+    id: i32,
+    delete_local_files: bool,
+) -> std::result::Result<(
+    crate::api::response::DeleteVideoSourceResponse,
+    Option<OrphanVideoCleanupPlan>,
+), ApiError> {
+    let related_videos = find_videos_by_source_relation(conn, source_type, id).await?;
+    let related_video_count = related_videos.len();
+
+    if related_videos.is_empty() {
+        return Ok((
+            crate::api::response::DeleteVideoSourceResponse {
+                success: true,
+                source_id: id,
+                source_type: source_type.to_string(),
+                message: format!("{}，没有发现残留关联", delete_video_source_missing_message(source_type)),
+            },
+            None,
+        ));
+    }
+
+    clear_video_source_relation(conn, source_type, id).await?;
+
+    let affected_video_ids: Vec<i32> = related_videos.iter().map(|video| video.id).collect();
+    let orphaned_videos = find_orphaned_videos_by_ids(conn, affected_video_ids).await?;
+    let orphaned_video_count = orphaned_videos.len();
+
+    let cleanup_plan = if delete_local_files && !orphaned_videos.is_empty() {
+        Some(
+            build_orphan_video_cleanup_plan(
+                conn,
+                format!("已删除的视频源 {} ID={}", source_type, id),
+                &orphaned_videos,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    delete_orphaned_videos_from_db(conn, &orphaned_videos).await?;
+
+    Ok((
+        crate::api::response::DeleteVideoSourceResponse {
+            success: true,
+            source_id: id,
+            source_type: source_type.to_string(),
+            message: format!(
+                "{}，已清理 {} 个残留关联视频，其中 {} 个孤儿视频和分页已移除",
+                delete_video_source_missing_message(source_type),
+                related_video_count,
+                orphaned_video_count
+            ),
+        },
+        cleanup_plan,
+    ))
+}
+
 pub async fn delete_video_source_internal(
     db: Arc<DatabaseConnection>,
     source_type: String,
@@ -5584,8 +6083,26 @@ pub async fn delete_video_source_internal(
     let mut upper_id_to_clear: Option<i64> = None;
     let mut cleanup_plan: Option<LocalSourceCleanupPlan> = None;
 
+    if !is_supported_delete_video_source_type(source_type.as_str()) {
+        return Err(anyhow!("不支持的视频源类型: {}", source_type).into());
+    }
+
     // 使用主数据库连接
     let txn = crate::database::begin_traced_transaction(&db, "api.handler.delete_video_source").await?;
+
+    if !delete_video_source_record_exists(&txn, source_type.as_str(), id).await? {
+        let (response, orphan_cleanup_plan) =
+            cleanup_missing_video_source_references(&txn, source_type.as_str(), id, delete_local_files).await?;
+        txn.commit().await?;
+        notify_video_sources_changed();
+        notify_videos_changed();
+
+        if let Some(plan) = orphan_cleanup_plan {
+            execute_orphan_video_cleanup_plan(db.as_ref(), plan).await;
+        }
+
+        return Ok(response);
+    }
 
     // 根据不同类型的视频源执行不同的删除操作
     let result = match source_type.as_str() {
@@ -5932,6 +6449,30 @@ pub async fn delete_video_source_internal(
     }
 
     Ok(result)
+}
+
+fn schedule_delete_tasks_after_active_work_finishes(db: Arc<DatabaseConnection>) {
+    tokio::spawn(async move {
+        while crate::task::is_scanning() || crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        if let Err(err) = crate::task::process_delete_tasks(db).await {
+            error!("后台处理删除任务队列失败: {:#}", err);
+        }
+    });
+}
+
+fn schedule_video_delete_tasks_after_active_work_finishes(db: Arc<DatabaseConnection>) {
+    tokio::spawn(async move {
+        while crate::task::is_scanning() || crate::utils::task_notifier::TASK_STATUS_NOTIFIER.is_running() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        if let Err(err) = crate::task::process_video_delete_tasks(db).await {
+            error!("后台处理视频删除任务队列失败: {:#}", err);
+        }
+    });
 }
 
 /// 更新视频源扫描已删除视频设置
@@ -7415,8 +7956,15 @@ pub async fn reset_video_source_path_internal(
                 for video in &videos {
                     let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        collection.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7430,7 +7978,14 @@ pub async fn reset_video_source_path_internal(
 
                     // 重新生成视频和分页的路径
                     if move_succeeded {
-                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            collection.flat_folder,
+                        )
+                        .await
+                        {
                             warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                         }
                     }
@@ -7474,8 +8029,15 @@ pub async fn reset_video_source_path_internal(
                 for video in &videos {
                     let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        favorite.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7489,7 +8051,14 @@ pub async fn reset_video_source_path_internal(
 
                     // 重新生成视频和分页的路径
                     if move_succeeded {
-                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            favorite.flat_folder,
+                        )
+                        .await
+                        {
                             warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                         }
                     }
@@ -7532,8 +8101,15 @@ pub async fn reset_video_source_path_internal(
                 for video in &videos {
                     let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        submission.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7547,7 +8123,14 @@ pub async fn reset_video_source_path_internal(
 
                     // 重新生成视频和分页的路径
                     if move_succeeded {
-                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            submission.flat_folder,
+                        )
+                        .await
+                        {
                             warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                         }
                     }
@@ -7590,8 +8173,15 @@ pub async fn reset_video_source_path_internal(
                 for video in &videos {
                     let mut move_succeeded = true;
                     // 移动视频文件到新路径结构
-                    match move_video_files_to_new_path(video, &old_path, &request.new_path, request.clean_empty_folders)
-                        .await
+                    match move_video_files_to_new_path(
+                        video,
+                        &old_path,
+                        &request.new_path,
+                        watch_later.flat_folder,
+                        request.clean_empty_folders,
+                        &txn,
+                    )
+                    .await
                     {
                         Ok((moved, cleaned)) => {
                             moved_files_count += moved;
@@ -7605,7 +8195,14 @@ pub async fn reset_video_source_path_internal(
 
                     // 重新生成视频和分页的路径
                     if move_succeeded {
-                        if let Err(e) = regenerate_video_and_page_paths_correctly(&txn, video.id, &request.new_path).await {
+                        if let Err(e) = regenerate_video_and_page_paths_correctly(
+                            &txn,
+                            video.id,
+                            &request.new_path,
+                            watch_later.flat_folder,
+                        )
+                        .await
+                        {
                             warn!("更新视频 {} 路径失败: {:?}", video.id, e);
                         }
                     }
@@ -7653,6 +8250,7 @@ pub async fn reset_video_source_path_internal(
                         first_video,
                         &old_path,
                         &request.new_path,
+                        bangumi.flat_folder,
                         request.clean_empty_folders,
                         &txn,
                     )
@@ -7664,8 +8262,13 @@ pub async fn reset_video_source_path_internal(
 
                             // 移动成功后，更新所有视频的数据库路径到相同的新路径
                             for video in &videos {
-                                if let Err(e) =
-                                    update_bangumi_video_path_in_database(&txn, video, &request.new_path).await
+                                if let Err(e) = update_bangumi_video_path_in_database(
+                                    &txn,
+                                    video,
+                                    &request.new_path,
+                                    bangumi.flat_folder,
+                                )
+                                .await
                                 {
                                     warn!("更新番剧视频 {} 数据库路径失败: {:?}", video.id, e);
                                 }
@@ -7787,15 +8390,154 @@ async fn move_files_with_four_step_rename(old_path: &str, target_path: &str) -> 
     Ok(final_path.to_string_lossy().to_string())
 }
 
-/// 移动视频文件到新路径结构，返回(移动的文件数量, 清理的文件夹数量)
-async fn move_video_files_to_new_path(
+fn build_flat_folder_target_path(
+    current_file_path: &str,
+    old_base_path: &str,
+    new_base_path: &str,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    if let Some(remapped_path) = remap_page_path_with_video_prefix(current_file_path, old_base_path, new_base_path) {
+        return Ok(std::path::PathBuf::from(remapped_path));
+    }
+
+    let file_name = std::path::Path::new(current_file_path)
+        .file_name()
+        .ok_or_else(|| std::io::Error::other(format!("无法从路径提取文件名: {current_file_path}")))?;
+    Ok(std::path::Path::new(new_base_path).join(file_name))
+}
+
+async fn move_flat_folder_file(
+    source_path: &std::path::Path,
+    target_path: &std::path::Path,
+    cleanup_candidates: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<usize, std::io::Error> {
+    if !source_path.exists() || source_path == target_path {
+        return Ok(0);
+    }
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::rename(source_path, target_path)?;
+    if let Some(parent) = source_path.parent() {
+        cleanup_candidates.insert(parent.to_path_buf());
+    }
+    Ok(1)
+}
+
+async fn move_flat_folder_page_files(
+    page_path: &std::path::Path,
+    target_page_path: &std::path::Path,
+    cleanup_candidates: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<usize, std::io::Error> {
+    let source_dir = page_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("无法获取分页文件父目录: {}", page_path.display())))?;
+    let target_dir = target_page_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("无法获取目标文件父目录: {}", target_page_path.display())))?;
+    let source_stem = page_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| std::io::Error::other(format!("无法获取分页文件名: {}", page_path.display())))?;
+    let target_stem = target_page_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| std::io::Error::other(format!("无法获取目标文件名: {}", target_page_path.display())))?;
+
+    let mut moved_count = move_flat_folder_file(page_path, target_page_path, cleanup_candidates).await?;
+
+    for suffix in [".nfo", ".zh-CN.default.ass", ".ass", ".srt", ".xml"] {
+        let source_companion = source_dir.join(format!("{source_stem}{suffix}"));
+        let target_companion = target_dir.join(format!("{target_stem}{suffix}"));
+        moved_count += move_flat_folder_file(&source_companion, &target_companion, cleanup_candidates).await?;
+    }
+
+    for cover_suffix in ["fanart", "thumb", "poster"] {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            let source_cover = source_dir.join(format!("{source_stem}-{cover_suffix}.{ext}"));
+            let target_cover = target_dir.join(format!("{target_stem}-{cover_suffix}.{ext}"));
+            moved_count += move_flat_folder_file(&source_cover, &target_cover, cleanup_candidates).await?;
+        }
+    }
+
+    Ok(moved_count)
+}
+
+async fn move_flat_folder_video_files_to_new_path(
     video: &video::Model,
-    _old_base_path: &str,
+    pages: &[page::Model],
+    old_base_path: &str,
     new_base_path: &str,
     clean_empty_folders: bool,
 ) -> Result<(usize, usize), std::io::Error> {
+    let new_base_dir = std::path::Path::new(new_base_path);
+    std::fs::create_dir_all(new_base_dir)?;
+
+    let mut moved_count = 0;
+    let mut cleaned_count = 0;
+    let mut cleanup_candidates = std::collections::HashSet::new();
+
+    for page_model in pages {
+        let Some(current_page_path) = page_model.path.as_deref().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+
+        let target_page_path = build_flat_folder_target_path(current_page_path, old_base_path, new_base_path)?;
+        moved_count += move_flat_folder_page_files(
+            std::path::Path::new(current_page_path),
+            &target_page_path,
+            &mut cleanup_candidates,
+        )
+        .await?;
+    }
+
+    if clean_empty_folders {
+        let mut cleanup_dirs: Vec<_> = cleanup_candidates.into_iter().collect();
+        cleanup_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+        for dir in cleanup_dirs {
+            if let Ok(count) = cleanup_empty_directory(&dir).await {
+                cleaned_count += count;
+            }
+        }
+    }
+
+    if moved_count == 0 && pages.is_empty() {
+        debug!("平铺目录视频 {} 没有分页路径，跳过文件迁移", video.id);
+    }
+
+    Ok((moved_count, cleaned_count))
+}
+
+/// 移动视频文件到新路径结构，返回(移动的文件数量, 清理的文件夹数量)
+async fn move_video_files_to_new_path(
+    video: &video::Model,
+    old_base_path: &str,
+    new_base_path: &str,
+    flat_folder: bool,
+    clean_empty_folders: bool,
+    txn: &sea_orm::DatabaseTransaction,
+) -> Result<(usize, usize), std::io::Error> {
     use std::path::Path;
 
+    if flat_folder {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video.id))
+            .all(txn)
+            .await
+            .map_err(|e| std::io::Error::other(format!("查询分页路径失败: {e}")))?;
+        return move_flat_folder_video_files_to_new_path(
+            video,
+            &pages,
+            old_base_path,
+            new_base_path,
+            clean_empty_folders,
+        )
+        .await;
+    }
+
+    let mut moved_count = 0;
     let mut cleaned_count = 0;
 
     // 获取当前视频的存储路径
@@ -7884,6 +8626,7 @@ async fn regenerate_video_and_page_paths_correctly(
     txn: &sea_orm::DatabaseTransaction,
     video_id: i32,
     new_base_path: &str,
+    flat_folder: bool,
 ) -> Result<(), ApiError> {
     use std::path::Path;
 
@@ -7895,13 +8638,16 @@ async fn regenerate_video_and_page_paths_correctly(
     let old_video_path = video.path.clone();
 
     // 重新生成视频路径
-    let new_video_path = crate::config::with_config(|bundle| {
-        let video_args = crate::utils::format_arg::video_format_args(&video);
-        bundle.render_video_template(&video_args)
-    })
-    .map_err(|e| anyhow!("视频路径模板渲染失败: {}", e))?;
-
-    let full_new_video_path = Path::new(new_base_path).join(&new_video_path);
+    let full_new_video_path = if flat_folder {
+        Path::new(new_base_path).to_path_buf()
+    } else {
+        let new_video_path = crate::config::with_config(|bundle| {
+            let video_args = crate::utils::format_arg::video_format_args(&video);
+            bundle.render_video_template(&video_args)
+        })
+        .map_err(|e| anyhow!("视频路径模板渲染失败: {}", e))?;
+        Path::new(new_base_path).join(&new_video_path)
+    };
 
     // 更新视频路径
     video::Entity::update_many()
@@ -8020,6 +8766,7 @@ pub async fn get_config() -> Result<ApiResponse<crate::api::response::ConfigResp
         time_format: config.time_format.clone(),
         interval: config.interval,
         nfo_time_type: nfo_time_type.to_string(),
+        nfo_include_genre: config.nfo_config.include_genre,
         parallel_download_enabled: config.concurrent_limit.parallel_download.enabled,
         parallel_download_threads: config.concurrent_limit.parallel_download.threads,
         parallel_download_use_aria2: config.concurrent_limit.parallel_download.use_aria2,
@@ -8197,6 +8944,7 @@ pub async fn update_config(
             time_format: params.time_format.clone(),
             interval: params.interval,
             nfo_time_type: params.nfo_time_type.clone(),
+            nfo_include_genre: params.nfo_include_genre,
             parallel_download_enabled: params.parallel_download_enabled,
             parallel_download_threads: params.parallel_download_threads,
             parallel_download_use_aria2: params.parallel_download_use_aria2,
@@ -8416,6 +9164,26 @@ fn format_config_update_fields_display(updated_fields: &[&str]) -> Vec<String> {
     result
 }
 
+fn should_reset_nfo_tasks(updated_fields: &[&str]) -> bool {
+    updated_fields.contains(&"nfo_time_type")
+}
+
+#[cfg(test)]
+mod config_update_tests {
+    use super::should_reset_nfo_tasks;
+
+    #[test]
+    fn changing_nfo_genre_toggle_does_not_reset_nfo_tasks() {
+        assert!(!should_reset_nfo_tasks(&["nfo_include_genre"]));
+    }
+
+    #[test]
+    fn changing_nfo_time_type_still_resets_nfo_tasks() {
+        assert!(should_reset_nfo_tasks(&["nfo_time_type"]));
+        assert!(should_reset_nfo_tasks(&["nfo_include_genre", "nfo_time_type"]));
+    }
+}
+
 pub async fn update_config_internal(
     db: Arc<DatabaseConnection>,
     params: crate::api::request::UpdateConfigRequest,
@@ -8479,49 +9247,67 @@ pub async fn update_config_internal(
 
     // 获取当前配置的副本
     let mut config = crate::config::reload_config();
+    let default_config = crate::config::Config::default();
+    let default_ai_rename = crate::utils::ai_rename::AiRenameConfig::default();
     let mut updated_fields = Vec::new();
 
     // 记录原始的NFO时间类型，用于比较是否真正发生了变化
     let original_nfo_time_type = config.nfo_time_type.clone();
+    let original_nfo_include_genre = config.nfo_config.include_genre;
 
     // 记录原始的命名相关配置，用于比较是否真正发生了变化
-    let original_video_name = config.video_name.clone();
-    let original_page_name = config.page_name.clone();
-    let original_multi_page_name = config.multi_page_name.clone();
-    let original_bangumi_name = config.bangumi_name.clone();
-    let original_folder_structure = config.folder_structure.clone();
     let original_collection_folder_mode = config.collection_folder_mode.clone();
-    let original_collection_unified_name = config.collection_unified_name.clone();
     let original_favorite_quick_subscribe_path = config.favorite_quick_subscribe_path.clone();
     let original_collection_quick_subscribe_path = config.collection_quick_subscribe_path.clone();
     let original_submission_quick_subscribe_path = config.submission_quick_subscribe_path.clone();
     let original_bangumi_quick_subscribe_path = config.bangumi_quick_subscribe_path.clone();
+    let original_danmaku_update_enabled = config.danmaku_update_policy.enabled;
 
     // 更新配置字段
     if let Some(video_name) = params.video_name {
-        if !video_name.trim().is_empty() && video_name != original_video_name.as_ref() {
-            config.video_name = Cow::Owned(video_name);
+        let normalized_video_name = if video_name.trim().is_empty() {
+            default_config.video_name.clone()
+        } else {
+            Cow::Owned(video_name)
+        };
+        if normalized_video_name != config.video_name {
+            config.video_name = normalized_video_name;
             updated_fields.push("video_name");
         }
     }
 
     if let Some(page_name) = params.page_name {
-        if !page_name.trim().is_empty() && page_name != original_page_name.as_ref() {
-            config.page_name = Cow::Owned(page_name);
+        let normalized_page_name = if page_name.trim().is_empty() {
+            default_config.page_name.clone()
+        } else {
+            Cow::Owned(page_name)
+        };
+        if normalized_page_name != config.page_name {
+            config.page_name = normalized_page_name;
             updated_fields.push("page_name");
         }
     }
 
     if let Some(multi_page_name) = params.multi_page_name {
-        if !multi_page_name.trim().is_empty() && multi_page_name != original_multi_page_name.as_ref() {
-            config.multi_page_name = Cow::Owned(multi_page_name);
+        let normalized_multi_page_name = if multi_page_name.trim().is_empty() {
+            default_config.multi_page_name.clone()
+        } else {
+            Cow::Owned(multi_page_name)
+        };
+        if normalized_multi_page_name != config.multi_page_name {
+            config.multi_page_name = normalized_multi_page_name;
             updated_fields.push("multi_page_name");
         }
     }
 
     if let Some(folder_structure) = params.folder_structure {
-        if !folder_structure.trim().is_empty() && folder_structure != original_folder_structure.as_ref() {
-            config.folder_structure = Cow::Owned(folder_structure);
+        let normalized_folder_structure = if folder_structure.trim().is_empty() {
+            default_config.folder_structure.clone()
+        } else {
+            Cow::Owned(folder_structure)
+        };
+        if normalized_folder_structure != config.folder_structure {
+            config.folder_structure = normalized_folder_structure;
             updated_fields.push("folder_structure");
         }
     }
@@ -8563,8 +9349,13 @@ pub async fn update_config_internal(
         if has_path_separator_outside_handlebars(trimmed) {
             return Err(anyhow!("合集统一模式命名模板不应包含路径分隔符 / 或 \\").into());
         }
-        if !trimmed.is_empty() && trimmed != original_collection_unified_name.as_ref() {
-            config.collection_unified_name = Cow::Owned(trimmed.to_string());
+        let normalized_collection_unified_name = if trimmed.is_empty() {
+            default_config.collection_unified_name.clone()
+        } else {
+            Cow::Owned(trimmed.to_string())
+        };
+        if normalized_collection_unified_name != config.collection_unified_name {
+            config.collection_unified_name = normalized_collection_unified_name;
             updated_fields.push("collection_unified_name");
         }
     }
@@ -8602,8 +9393,13 @@ pub async fn update_config_internal(
     }
 
     if let Some(time_format) = params.time_format {
-        if !time_format.trim().is_empty() && time_format != config.time_format {
-            config.time_format = time_format;
+        let normalized_time_format = if time_format.trim().is_empty() {
+            default_config.time_format.clone()
+        } else {
+            time_format
+        };
+        if normalized_time_format != config.time_format {
+            config.time_format = normalized_time_format;
             updated_fields.push("time_format");
         }
     }
@@ -8629,16 +9425,33 @@ pub async fn update_config_internal(
         }
     }
 
+    if let Some(nfo_include_genre) = params.nfo_include_genre {
+        if original_nfo_include_genre != nfo_include_genre {
+            config.nfo_config.include_genre = nfo_include_genre;
+            updated_fields.push("nfo_include_genre");
+        }
+    }
+
     if let Some(bangumi_name) = params.bangumi_name {
-        if !bangumi_name.trim().is_empty() && bangumi_name != original_bangumi_name.as_ref() {
-            config.bangumi_name = Cow::Owned(bangumi_name);
+        let normalized_bangumi_name = if bangumi_name.trim().is_empty() {
+            default_config.bangumi_name.clone()
+        } else {
+            Cow::Owned(bangumi_name)
+        };
+        if normalized_bangumi_name != config.bangumi_name {
+            config.bangumi_name = normalized_bangumi_name;
             updated_fields.push("bangumi_name");
         }
     }
 
     if let Some(bangumi_folder_name) = params.bangumi_folder_name {
-        if !bangumi_folder_name.trim().is_empty() && bangumi_folder_name != config.bangumi_folder_name.as_ref() {
-            config.bangumi_folder_name = Cow::Owned(bangumi_folder_name);
+        let normalized_bangumi_folder_name = if bangumi_folder_name.trim().is_empty() {
+            default_config.bangumi_folder_name.clone()
+        } else {
+            Cow::Owned(bangumi_folder_name)
+        };
+        if normalized_bangumi_folder_name != config.bangumi_folder_name {
+            config.bangumi_folder_name = normalized_bangumi_folder_name;
             updated_fields.push("bangumi_folder_name");
         }
     }
@@ -8757,8 +9570,13 @@ pub async fn update_config_internal(
     }
 
     if let Some(font) = params.danmaku_font {
-        if !font.trim().is_empty() && font != config.danmaku_option.font {
-            config.danmaku_option.font = font;
+        let normalized_font = if font.trim().is_empty() {
+            default_config.danmaku_option.font.clone()
+        } else {
+            font
+        };
+        if normalized_font != config.danmaku_option.font {
+            config.danmaku_option.font = normalized_font;
             updated_fields.push("danmaku_font");
         }
     }
@@ -9168,12 +9986,15 @@ pub async fn update_config_internal(
 
     // UP主头像保存路径
     if let Some(upper_path) = params.upper_path {
-        if !upper_path.trim().is_empty() {
-            let new_path = std::path::PathBuf::from(upper_path);
-            if new_path != config.upper_path {
-                config.upper_path = new_path;
-                updated_fields.push("upper_path");
-            }
+        let trimmed_upper_path = upper_path.trim();
+        let new_path = if trimmed_upper_path.is_empty() {
+            default_config.upper_path.clone()
+        } else {
+            std::path::PathBuf::from(trimmed_upper_path)
+        };
+        if new_path != config.upper_path {
+            config.upper_path = new_path;
+            updated_fields.push("upper_path");
         }
     }
 
@@ -9187,40 +10008,41 @@ pub async fn update_config_internal(
 
     // 服务器绑定地址配置
     if let Some(bind_address) = params.bind_address {
-        if !bind_address.trim().is_empty() {
-            let normalized_address = if bind_address.contains(':') {
-                // 已经包含端口，直接使用
-                bind_address.clone()
-            } else {
-                // 只有端口号，添加默认IP
-                if let Ok(port) = bind_address.parse::<u16>() {
-                    if port == 0 {
-                        return Err(anyhow!("端口号不能为0").into());
-                    }
-                    format!("0.0.0.0:{}", port)
-                } else {
-                    return Err(anyhow!("无效的端口号格式").into());
+        let trimmed_bind_address = bind_address.trim();
+        let normalized_address = if trimmed_bind_address.is_empty() {
+            default_config.bind_address.clone()
+        } else if trimmed_bind_address.contains(':') {
+            // 已经包含端口，直接使用
+            trimmed_bind_address.to_string()
+        } else {
+            // 只有端口号，添加默认IP
+            if let Ok(port) = trimmed_bind_address.parse::<u16>() {
+                if port == 0 {
+                    return Err(anyhow!("端口号不能为0").into());
                 }
-            };
+                format!("0.0.0.0:{}", port)
+            } else {
+                return Err(anyhow!("无效的端口号格式").into());
+            }
+        };
 
-            // 验证地址格式
-            if let Some(colon_pos) = normalized_address.rfind(':') {
-                let (_ip, port_str) = normalized_address.split_at(colon_pos + 1);
-                if let Ok(port) = port_str.parse::<u16>() {
-                    if port == 0 {
-                        return Err(anyhow!("端口号不能为0").into());
-                    }
-                } else {
-                    return Err(anyhow!("无效的端口号格式").into());
+        // 验证地址格式
+        if let Some(colon_pos) = normalized_address.rfind(':') {
+            let (_ip, port_str) = normalized_address.split_at(colon_pos + 1);
+            if let Ok(port) = port_str.parse::<u16>() {
+                if port == 0 {
+                    return Err(anyhow!("端口号不能为0").into());
                 }
             } else {
-                return Err(anyhow!("绑定地址格式无效，应为 'IP:端口' 或 '端口'").into());
+                return Err(anyhow!("无效的端口号格式").into());
             }
+        } else {
+            return Err(anyhow!("绑定地址格式无效，应为 'IP:端口' 或 '端口'").into());
+        }
 
-            if normalized_address != config.bind_address {
-                config.bind_address = normalized_address;
-                updated_fields.push("bind_address");
-            }
+        if normalized_address != config.bind_address {
+            config.bind_address = normalized_address;
+            updated_fields.push("bind_address");
         }
     }
 
@@ -9285,20 +10107,21 @@ pub async fn update_config_internal(
     }
 
     if let Some(api_key) = params.risk_control_auto_solve_api_key {
-        if !api_key.trim().is_empty() {
-            // 如果auto_solve配置不存在，创建一个新的
-            if config.risk_control.auto_solve.is_none() {
+        let normalized_api_key = api_key.trim().to_string();
+        if config.risk_control.auto_solve.is_none() {
+            if !normalized_api_key.is_empty() {
+                // 如果auto_solve配置不存在，创建一个新的
                 config.risk_control.auto_solve = Some(crate::config::AutoSolveConfig {
                     service: "2captcha".to_string(),
-                    api_key: api_key.clone(),
+                    api_key: normalized_api_key.clone(),
                     max_retries: 3,
                     solve_timeout: 120,
                 });
                 updated_fields.push("risk_control.auto_solve.api_key");
-            } else if config.risk_control.auto_solve.as_ref().unwrap().api_key != api_key {
-                config.risk_control.auto_solve.as_mut().unwrap().api_key = api_key;
-                updated_fields.push("risk_control.auto_solve.api_key");
             }
+        } else if config.risk_control.auto_solve.as_ref().unwrap().api_key != normalized_api_key {
+            config.risk_control.auto_solve.as_mut().unwrap().api_key = normalized_api_key;
+            updated_fields.push("risk_control.auto_solve.api_key");
         }
     }
 
@@ -9346,14 +10169,24 @@ pub async fn update_config_internal(
         }
     }
     if let Some(provider) = &params.ai_rename_provider {
-        if config.ai_rename.provider != *provider {
-            config.ai_rename.provider = provider.clone();
+        let normalized_provider = if provider.trim().is_empty() {
+            default_ai_rename.provider.clone()
+        } else {
+            provider.trim().to_string()
+        };
+        if config.ai_rename.provider != normalized_provider {
+            config.ai_rename.provider = normalized_provider;
             updated_fields.push("ai_rename");
         }
     }
     if let Some(base_url) = &params.ai_rename_base_url {
-        if config.ai_rename.base_url != *base_url {
-            config.ai_rename.base_url = base_url.clone();
+        let normalized_base_url = if base_url.trim().is_empty() {
+            default_ai_rename.base_url.clone()
+        } else {
+            base_url.trim().to_string()
+        };
+        if config.ai_rename.base_url != normalized_base_url {
+            config.ai_rename.base_url = normalized_base_url;
             updated_fields.push("ai_rename");
         }
     }
@@ -9376,8 +10209,13 @@ pub async fn update_config_internal(
         }
     }
     if let Some(model) = &params.ai_rename_model {
-        if config.ai_rename.model != *model {
-            config.ai_rename.model = model.clone();
+        let normalized_model = if model.trim().is_empty() {
+            default_ai_rename.model.clone()
+        } else {
+            model.trim().to_string()
+        };
+        if config.ai_rename.model != normalized_model {
+            config.ai_rename.model = normalized_model;
             updated_fields.push("ai_rename");
         }
     }
@@ -9388,14 +10226,24 @@ pub async fn update_config_internal(
         }
     }
     if let Some(video_prompt_hint) = &params.ai_rename_video_prompt_hint {
-        if config.ai_rename.video_prompt_hint != *video_prompt_hint {
-            config.ai_rename.video_prompt_hint = video_prompt_hint.clone();
+        let normalized_video_prompt_hint = if video_prompt_hint.trim().is_empty() {
+            default_ai_rename.video_prompt_hint.clone()
+        } else {
+            video_prompt_hint.clone()
+        };
+        if config.ai_rename.video_prompt_hint != normalized_video_prompt_hint {
+            config.ai_rename.video_prompt_hint = normalized_video_prompt_hint;
             updated_fields.push("ai_rename");
         }
     }
     if let Some(audio_prompt_hint) = &params.ai_rename_audio_prompt_hint {
-        if config.ai_rename.audio_prompt_hint != *audio_prompt_hint {
-            config.ai_rename.audio_prompt_hint = audio_prompt_hint.clone();
+        let normalized_audio_prompt_hint = if audio_prompt_hint.trim().is_empty() {
+            default_ai_rename.audio_prompt_hint.clone()
+        } else {
+            audio_prompt_hint.clone()
+        };
+        if config.ai_rename.audio_prompt_hint != normalized_audio_prompt_hint {
+            config.ai_rename.audio_prompt_hint = normalized_audio_prompt_hint;
             updated_fields.push("ai_rename");
         }
     }
@@ -9436,6 +10284,13 @@ pub async fn update_config_internal(
 
     let updated_field_labels = format_config_update_fields_display(&updated_fields);
     let updated_fields_display = updated_field_labels.join("、");
+    let should_initialize_danmaku_baseline = !original_danmaku_update_enabled && config.danmaku_update_policy.enabled;
+
+    if should_initialize_danmaku_baseline {
+        crate::workflow_danmaku::initialize_danmaku_incremental_baseline(db.as_ref(), &config)
+            .await
+            .context("初始化弹幕增量更新基线失败")?;
+    }
 
     // 移除配置文件保存 - 配置现在完全基于数据库
     // config.save()?;
@@ -9543,6 +10398,11 @@ pub async fn update_config_internal(
                 "nfo_time_type" => {
                     manager
                         .update_config_item("nfo_time_type", serde_json::to_value(&config.nfo_time_type)?)
+                        .await
+                }
+                "nfo_include_genre" => {
+                    manager
+                        .update_config_item("nfo_config", serde_json::to_value(&config.nfo_config)?)
                         .await
                 }
                 "upper_path" => {
@@ -9877,7 +10737,7 @@ pub async fn update_config_internal(
     }
 
     // 检查是否需要重置NFO任务状态
-    let should_reset_nfo = updated_fields.contains(&"nfo_time_type");
+    let should_reset_nfo = should_reset_nfo_tasks(&updated_fields);
     let mut resetted_nfo_videos_count = 0;
     let mut resetted_nfo_pages_count = 0;
 
@@ -11745,6 +12605,7 @@ pub struct QueueStatusResponse {
     pub delete_queue: QueueInfo,
     pub video_delete_queue: QueueInfo,
     pub add_queue: QueueInfo,
+    pub danmaku_queue: QueueInfo,
     pub config_queue: ConfigQueueInfo,
 }
 
@@ -11788,7 +12649,10 @@ pub async fn get_queue_status() -> Result<ApiResponse<QueueStatusResponse>, ApiE
 }
 
 async fn load_queue_status_response() -> QueueStatusResponse {
-    use crate::task::{ADD_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, TASK_CONTROLLER, VIDEO_DELETE_TASK_QUEUE};
+    use crate::task::{
+        ADD_TASK_QUEUE, CONFIG_TASK_QUEUE, DELETE_TASK_QUEUE, REFRESH_DANMAKU_TASK_QUEUE, TASK_CONTROLLER,
+        VIDEO_DELETE_TASK_QUEUE,
+    };
 
     // 获取扫描状态
     let is_scanning = TASK_CONTROLLER.is_scanning();
@@ -11837,6 +12701,23 @@ async fn load_queue_status_response() -> QueueStatusResponse {
         })
         .collect();
 
+    let danmaku_raw_tasks = REFRESH_DANMAKU_TASK_QUEUE.list_tasks().await;
+    let danmaku_queue_length = danmaku_raw_tasks.len();
+    let danmaku_is_processing = REFRESH_DANMAKU_TASK_QUEUE.is_processing();
+    let danmaku_tasks = danmaku_raw_tasks
+        .into_iter()
+        .map(|task| QueueTaskInfo {
+            task_id: task.task_id,
+            task_type: "refresh_danmaku".to_string(),
+            description: match (task.video_id, task.page_id) {
+                (Some(video_id), None) => format!("刷新视频弹幕 ID={}", video_id),
+                (None, Some(page_id)) => format!("刷新分页弹幕 ID={}", page_id),
+                _ => "刷新弹幕".to_string(),
+            },
+            created_at: now_standard_string(),
+        })
+        .collect();
+
     // 获取配置队列状态
     let config_update_raw_tasks = CONFIG_TASK_QUEUE.list_update_tasks().await;
     let config_reload_raw_tasks = CONFIG_TASK_QUEUE.list_reload_tasks().await;
@@ -11880,6 +12761,11 @@ async fn load_queue_status_response() -> QueueStatusResponse {
             length: add_queue_length,
             is_processing: add_is_processing,
             tasks: add_tasks,
+        },
+        danmaku_queue: QueueInfo {
+            length: danmaku_queue_length,
+            is_processing: danmaku_is_processing,
+            tasks: danmaku_tasks,
         },
         config_queue: ConfigQueueInfo {
             update_length: config_update_length,
@@ -12149,6 +13035,216 @@ async fn store_proxy_image_cache(
     );
 
     Ok(())
+}
+
+fn is_remote_url(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+fn image_candidate_key(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn push_unique_image_candidate(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
+    let key = image_candidate_key(&path);
+    if !key.trim().is_empty() && seen.insert(key) {
+        candidates.push(path);
+    }
+}
+
+fn push_sidecar_cover_candidates(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    media_path: &std::path::Path,
+) {
+    let Some(parent) = media_path.parent() else {
+        return;
+    };
+    let Some(stem) = media_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+    else {
+        return;
+    };
+
+    for suffix in ["thumb", "poster", "fanart"] {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            push_unique_image_candidate(candidates, seen, parent.join(format!("{stem}-{suffix}.{ext}")));
+        }
+    }
+}
+
+fn push_directory_cover_candidates(
+    candidates: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+    dir_path: &std::path::Path,
+    season_number: Option<i32>,
+) {
+    for file_name in ["folder", "poster", "thumb", "fanart"] {
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            push_unique_image_candidate(candidates, seen, dir_path.join(format!("{file_name}.{ext}")));
+        }
+    }
+
+    if let Some(name) = dir_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+    {
+        for suffix in ["thumb", "poster", "fanart"] {
+            for ext in ["jpg", "jpeg", "png", "webp"] {
+                push_unique_image_candidate(candidates, seen, dir_path.join(format!("{name}-{suffix}.{ext}")));
+            }
+        }
+    }
+
+    if let Some(season_number) = season_number.filter(|number| *number > 0) {
+        for suffix in ["thumb", "poster", "fanart"] {
+            for ext in ["jpg", "jpeg", "png", "webp"] {
+                push_unique_image_candidate(
+                    candidates,
+                    seen,
+                    dir_path.join(format!("Season{season_number:02}-{suffix}.{ext}")),
+                );
+            }
+        }
+    }
+}
+
+fn is_existing_image_file(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    if !matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp") {
+        return false;
+    }
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+fn find_local_video_cover(video_model: &video::Model, pages: &[page::Model]) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for page_model in pages {
+        if let Some(image_path) = page_model
+            .image
+            .as_deref()
+            .map(str::trim)
+            .filter(|image_path| !image_path.is_empty() && !is_remote_url(image_path))
+        {
+            push_unique_image_candidate(&mut candidates, &mut seen, PathBuf::from(image_path));
+        }
+
+        if let Some(page_path) = page_model
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|page_path| !page_path.is_empty())
+        {
+            push_sidecar_cover_candidates(&mut candidates, &mut seen, std::path::Path::new(page_path));
+        }
+    }
+
+    let video_path_text = video_model.path.trim();
+    if !video_path_text.is_empty() {
+        let video_path = std::path::Path::new(video_path_text);
+        if video_path.extension().is_some() {
+            push_sidecar_cover_candidates(&mut candidates, &mut seen, video_path);
+            if let Some(parent) = video_path.parent() {
+                push_directory_cover_candidates(&mut candidates, &mut seen, parent, video_model.season_number);
+            }
+        } else {
+            push_directory_cover_candidates(&mut candidates, &mut seen, video_path, video_model.season_number);
+        }
+    }
+
+    candidates.into_iter().find(|path| is_existing_image_file(path))
+}
+
+fn local_cover_not_found_response() -> axum::response::Response {
+    axum::response::Response::builder()
+        .status(404)
+        .header("Cache-Control", "no-store")
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/videos/{video_id}/cover",
+    params(
+        ("video_id" = i32, Path, description = "视频ID")
+    ),
+    responses(
+        (status = 200, description = "本地封面图片", content_type = "image/*"),
+        (status = 404, description = "没有可用的本地封面")
+    )
+)]
+pub async fn get_video_local_cover(
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+    Path(video_id): Path<i32>,
+) -> Result<axum::response::Response, ApiError> {
+    let Some(video_model) = video::Entity::find_by_id(video_id).one(db.as_ref()).await? else {
+        debug!("本地封面兜底未命中：视频不存在 video_id={}", video_id);
+        return Ok(local_cover_not_found_response());
+    };
+
+    let pages = page::Entity::find()
+        .filter(page::Column::VideoId.eq(video_id))
+        .order_by_asc(page::Column::Pid)
+        .all(db.as_ref())
+        .await?;
+
+    let Some(cover_path) = find_local_video_cover(&video_model, &pages) else {
+        debug!("本地封面兜底未命中：没有找到本地封面 video_id={}", video_id);
+        return Ok(local_cover_not_found_response());
+    };
+
+    let image_data = match tokio::fs::read(&cover_path).await {
+        Ok(image_data) if !image_data.is_empty() => image_data,
+        Ok(_) => {
+            debug!(
+                "本地封面兜底未命中：封面文件为空 video_id={}, path={}",
+                video_id,
+                cover_path.display()
+            );
+            return Ok(local_cover_not_found_response());
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            debug!(
+                "本地封面兜底未命中：封面文件不存在 video_id={}, path={}",
+                video_id,
+                cover_path.display()
+            );
+            return Ok(local_cover_not_found_response());
+        }
+        Err(err) => return Err(anyhow!("读取本地封面失败: {} ({})", cover_path.display(), err).into()),
+    };
+
+    let content_type = mime_guess::from_path(&cover_path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+    debug!(
+        "本地封面兜底命中: video_id={}, path={}, content_type={}, bytes={}",
+        video_id,
+        cover_path.display(),
+        content_type,
+        image_data.len()
+    );
+
+    Ok(axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", IMAGE_PROXY_CACHE_CONTROL)
+        .header("X-Image-Cache", "LOCAL")
+        .body(axum::body::Body::from(image_data))
+        .unwrap())
 }
 
 #[utoipa::path(
@@ -13233,7 +14329,72 @@ pub struct LatestIngestQuery {
     pub limit: Option<usize>,
 }
 
-/// 获取首页「最新入库」列表
+fn extract_series_name_from_share_copy(share_copy: &Option<String>) -> Option<String> {
+    share_copy.as_ref().and_then(|s| {
+        if let Some(start) = s.find('《') {
+            if let Some(end) = s.find('》') {
+                if end > start {
+                    return Some(s[start + 3..end].to_string()); // UTF-8 《 is 3 bytes
+                }
+            }
+        }
+        None
+    })
+}
+
+fn status_label_from_video(v: &video::Model) -> String {
+    if v.deleted != 0 {
+        return "deleted".to_string();
+    }
+
+    let st = VideoStatus::from(v.download_status);
+    let bits: [u32; 5] = st.into();
+    if bits.iter().all(|&b| b == crate::utils::status::STATUS_OK) {
+        "success".to_string()
+    } else if st.get_completed() {
+        "failed".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
+fn video_to_ingest_item(
+    v: video::Model,
+    ingested_at: String,
+    download_speed_bps: Option<u64>,
+) -> crate::api::response::LatestIngestItemResponse {
+    crate::api::response::LatestIngestItemResponse {
+        video_id: v.id,
+        video_name: v.name.clone(),
+        upper_name: v.upper_name.clone(),
+        path: v.path.clone(),
+        ingested_at,
+        download_speed_bps,
+        status: status_label_from_video(&v),
+        series_name: extract_series_name_from_share_copy(&v.share_copy),
+    }
+}
+
+fn ingest_event_to_response(e: crate::ingest_log::IngestEvent) -> crate::api::response::LatestIngestItemResponse {
+    use crate::ingest_log::IngestStatus;
+    let status_str = match e.status {
+        IngestStatus::Success => "success",
+        IngestStatus::Failed => "failed",
+        IngestStatus::Deleted => "deleted",
+    };
+    crate::api::response::LatestIngestItemResponse {
+        video_id: e.video_id,
+        video_name: e.video_name,
+        upper_name: e.upper_name,
+        path: e.path,
+        ingested_at: e.ingested_at,
+        download_speed_bps: e.download_speed_bps,
+        status: status_str.to_string(),
+        series_name: e.series_name,
+    }
+}
+
+/// 获取首页「最新入库」列表（只按数据库新增时间排序）
 #[utoipa::path(
     get,
     path = "/api/ingest/latest",
@@ -13251,10 +14412,49 @@ pub async fn get_latest_ingests(
 ) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
     let limit = query.limit.unwrap_or(10).clamp(1, 100);
 
+    let videos = video::Entity::find()
+        .order_by_desc(video::Column::CreatedAt)
+        .order_by_desc(video::Column::Id)
+        .limit(limit as u64)
+        .all(db.as_ref())
+        .await
+        .map_err(|e| ApiError::from(InnerApiError::from(e)))?;
+
+    let resp_items = videos
+        .into_iter()
+        .map(|v| {
+            let created_at = v.created_at.clone();
+            video_to_ingest_item(v, created_at, None)
+        })
+        .collect();
+
+    Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
+        items: resp_items,
+    }))
+}
+
+/// 获取首页「最近处理」列表（下载/修复/弹幕等任务完成事件）
+#[utoipa::path(
+    get,
+    path = "/api/ingest/recent",
+    params(
+        ("limit" = Option<usize>, Query, description = "返回条数，默认 10，最大 100")
+    ),
+    responses(
+        (status = 200, description = "获取成功", body = crate::api::response::LatestIngestResponse),
+        (status = 500, description = "内部错误")
+    )
+)]
+pub async fn get_recent_ingests(
+    Query(query): Query<LatestIngestQuery>,
+    Extension(db): Extension<Arc<DatabaseConnection>>,
+) -> Result<ApiResponse<crate::api::response::LatestIngestResponse>, ApiError> {
+    let limit = query.limit.unwrap_or(10).clamp(1, 100);
+
     // 1) 先取内存事件（带速度）
     let mut items = crate::ingest_log::INGEST_LOG.list_latest(limit).await;
 
-    // 2) 不足时再用 DB 补齐（速度可能为空，但保证首页总能显示）
+    // 2) 不足时再用 DB 补齐。DB 没有持久化“处理完成时间”，这里用新增时间兜底。
     if items.len() < limit {
         let need = limit - items.len();
         let mut existing_ids = std::collections::HashSet::new();
@@ -13275,32 +14475,7 @@ pub async fn get_latest_ingests(
             if existing_ids.contains(&v.id) {
                 continue;
             }
-            // 通过 deleted 字段和 status bits 判断状态
-            use crate::ingest_log::IngestStatus;
-            let status = if v.deleted != 0 {
-                IngestStatus::Deleted
-            } else {
-                let st = VideoStatus::from(v.download_status);
-                let bits: [u32; 5] = st.into();
-                if bits.iter().all(|&b| b == crate::utils::status::STATUS_OK) {
-                    IngestStatus::Success
-                } else {
-                    IngestStatus::Failed
-                }
-            };
-
-            // 从 share_copy 提取番剧系列名称（《剧名》格式）
-            let series_name = v.share_copy.as_ref().and_then(|s| {
-                if let Some(start) = s.find('《') {
-                    if let Some(end) = s.find('》') {
-                        if end > start {
-                            return Some(s[start + 3..end].to_string()); // UTF-8 《 is 3 bytes
-                        }
-                    }
-                }
-                None
-            });
-
+            let status = status_label_from_video(&v);
             items.push(crate::ingest_log::IngestEvent {
                 video_id: v.id,
                 video_name: v.name.clone(),
@@ -13308,34 +14483,18 @@ pub async fn get_latest_ingests(
                 path: v.path.clone(),
                 ingested_at: v.created_at.clone(),
                 download_speed_bps: None,
-                status,
-                series_name,
+                status: match status.as_str() {
+                    "deleted" => crate::ingest_log::IngestStatus::Deleted,
+                    "success" => crate::ingest_log::IngestStatus::Success,
+                    _ => crate::ingest_log::IngestStatus::Failed,
+                },
+                series_name: extract_series_name_from_share_copy(&v.share_copy),
             });
         }
     }
 
     // 3) 转响应结构
-    let resp_items = items
-        .into_iter()
-        .map(|e| {
-            use crate::ingest_log::IngestStatus;
-            let status_str = match e.status {
-                IngestStatus::Success => "success",
-                IngestStatus::Failed => "failed",
-                IngestStatus::Deleted => "deleted",
-            };
-            crate::api::response::LatestIngestItemResponse {
-                video_id: e.video_id,
-                video_name: e.video_name,
-                upper_name: e.upper_name,
-                path: e.path,
-                ingested_at: e.ingested_at,
-                download_speed_bps: e.download_speed_bps,
-                status: status_str.to_string(),
-                series_name: e.series_name,
-            }
-        })
-        .collect();
+    let resp_items = items.into_iter().map(ingest_event_to_response).collect();
 
     Ok(ApiResponse::ok(crate::api::response::LatestIngestResponse {
         items: resp_items,
@@ -14886,8 +16045,19 @@ async fn update_bangumi_video_path_in_database(
     txn: &sea_orm::DatabaseTransaction,
     video: &video::Model,
     new_base_path: &str,
+    flat_folder: bool,
 ) -> Result<(), ApiError> {
     use std::path::Path;
+
+    if flat_folder {
+        let video_path_str = Path::new(new_base_path).to_string_lossy().to_string();
+        video::Entity::update_many()
+            .filter(video::Column::Id.eq(video.id))
+            .col_expr(video::Column::Path, Expr::value(video_path_str.clone()))
+            .exec(txn)
+            .await?;
+        return Ok(());
+    }
 
     // 计算该视频的新路径（与move_bangumi_files_to_new_path使用相同逻辑）
     let new_video_dir = Path::new(new_base_path);
@@ -15018,12 +16188,29 @@ async fn update_bangumi_video_path_in_database(
 /// 番剧专用的文件移动函数，避免BVID后缀污染
 async fn move_bangumi_files_to_new_path(
     video: &video::Model,
-    _old_base_path: &str,
+    old_base_path: &str,
     new_base_path: &str,
+    flat_folder: bool,
     clean_empty_folders: bool,
     txn: &sea_orm::DatabaseTransaction,
 ) -> Result<(usize, usize), std::io::Error> {
     use std::path::Path;
+
+    if flat_folder {
+        let pages = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video.id))
+            .all(txn)
+            .await
+            .map_err(|e| std::io::Error::other(format!("查询番剧分页路径失败: {e}")))?;
+        return move_flat_folder_video_files_to_new_path(
+            video,
+            &pages,
+            old_base_path,
+            new_base_path,
+            clean_empty_folders,
+        )
+        .await;
+    }
 
     let mut moved_count = 0;
     let mut cleaned_count = 0;
@@ -16224,37 +17411,28 @@ fn extract_bangumi_season_title(full_title: &str) -> String {
 async fn get_collection_cover_from_api(
     up_id: i64,
     collection_id: i64,
+    collection_type: i32,
     client: &crate::bilibili::BiliClient,
 ) -> Result<String, anyhow::Error> {
-    // 分页获取所有合集，避免遗漏
-    let mut page = 1;
-    loop {
-        let collections_response = client.get_user_collections(up_id, page, 50).await?;
-
-        // 查找目标合集
-        for collection in &collections_response.collections {
-            if collection.sid.parse::<i64>().unwrap_or(0) == collection_id {
-                if !collection.cover.is_empty() {
-                    return Ok(collection.cover.clone());
-                } else {
-                    return Err(anyhow!("合集封面URL为空"));
-                }
-            }
-        }
-
-        // 检查是否还有更多页
-        if collections_response.collections.len() < 50 {
-            break; // 已经是最后一页
-        }
-        page += 1;
-
-        // 安全限制，避免无限循环
-        if page > 20 {
-            return Err(anyhow!("搜索合集时达到最大页数限制 (20页)"));
-        }
+    let expected_collection_type = if collection_type == 1 { "series" } else { "season" };
+    let collections_response = client
+        .get_user_collections(up_id, 1, 30)
+        .await
+        .with_context(|| format!("获取UP主 {} 的合集列表失败", up_id))?;
+    let collection = collections_response
+        .collections
+        .iter()
+        .find(|item| {
+            item.collection_type == expected_collection_type && item.sid.parse::<i64>().ok() == Some(collection_id)
+        })
+        .ok_or_else(|| anyhow!("未在合集列表中找到目标合集"))?;
+    let cover_url = collection.cover.trim();
+    if cover_url.is_empty() {
+        Err(anyhow!("合集封面URL为空"))
+    } else {
+        Ok(cover_url.to_string())
     }
-
-    Err(anyhow!("未找到合集ID {} (UP主: {})", collection_id, up_id))
+    .with_context(|| format!("获取合集 {} 封面失败 (UP主: {})", collection_id, up_id))
 }
 
 /// 处理番剧合并到现有源的逻辑

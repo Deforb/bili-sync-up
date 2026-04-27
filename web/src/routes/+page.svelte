@@ -14,7 +14,7 @@
 	import api from '$lib/api';
 	import { wsManager } from '$lib/ws';
 	import { runRequest } from '$lib/utils/request.js';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
 	import type {
 		DashBoardResponse,
 		SysInfo,
@@ -24,6 +24,8 @@
 	} from '$lib/types';
 	import AuthLogin from '$lib/components/auth-login.svelte';
 	import InitialSetup from '$lib/components/initial-setup.svelte';
+	import EmptyState from '$lib/components/empty-state.svelte';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	// 图标导入
 	import CloudDownloadIcon from '@lucide/svelte/icons/cloud-download';
@@ -61,6 +63,8 @@
 	let loadingLatestIngests = false;
 	let loadingTaskRefresh = false;
 	let showIngestSheet = false;
+	type IngestView = 'latest' | 'recent';
+	let ingestView: IngestView = 'latest';
 	let unsubscribeSysInfo: (() => void) | null = null;
 	let unsubscribeTasks: (() => void) | null = null;
 
@@ -88,20 +92,11 @@
 
 	// 统一按北京时间显示（24小时制）
 	function formatTime(timeStr: string | null | undefined): string {
-		if (!timeStr) return '-';
-		const formatted = formatTimestamp(timeStr, BEIJING_TIMEZONE, 'time');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return timeStr;
-		}
-		return formatted;
+		return formatTimestampOrFallback(timeStr, BEIJING_TIMEZONE, 'time', timeStr ?? '-');
 	}
 
 	function formatChartTime(v: string | number): string {
-		const formatted = formatTimestamp(v, BEIJING_TIMEZONE, 'time');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return `${v}`;
-		}
-		return formatted;
+		return formatTimestampOrFallback(v, BEIJING_TIMEZONE, 'time', `${v}`);
 	}
 
 	// 从路径提取番剧名称（备用方案，当 series_name 不可用时）
@@ -206,10 +201,17 @@
 		dashboardData = response.data;
 	}
 
-	async function loadLatestIngests() {
-		const response = await runRequest(() => api.getLatestIngests(10), {
+	function getIngestViewTitle(view: IngestView = ingestView): string {
+		return view === 'latest' ? '最新入库' : '最近处理';
+	}
+
+	async function loadIngests(view: IngestView = ingestView) {
+		ingestView = view;
+		const request =
+			view === 'latest' ? () => api.getLatestIngests(10) : () => api.getRecentIngests(10);
+		const response = await runRequest(request, {
 			setLoading: (value) => (loadingLatestIngests = value),
-			context: '加载最新入库失败'
+			context: `加载${getIngestViewTitle(view)}失败`
 		});
 		if (!response) return;
 		latestIngests = response.data.items || [];
@@ -276,7 +278,7 @@
 			await loadTaskControlStatus();
 			// 刷新后同步刷新首页数据
 			await loadDashboard();
-			await loadLatestIngests();
+			await loadIngests();
 		} else {
 			toast.error('任务刷新失败', { description: response.data.message });
 		}
@@ -288,7 +290,7 @@
 		// 加载仪表盘数据
 		await loadDashboard();
 		// 加载最新入库
-		await loadLatestIngests();
+		await loadIngests('latest');
 	}
 
 	onMount(() => {
@@ -398,18 +400,13 @@
 {:else}
 	<div class="space-y-6">
 		{#if loading}
-			<div class="flex items-center justify-center py-12">
-				<div class="text-muted-foreground">加载中...</div>
-			</div>
+			<Loading />
 		{:else}
 			<!-- 第一行：存储空间 + 当前监听 -->
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				<Card class="lg:col-span-1">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示当前磁盘可用空间、总容量和已用比例"
-						>
+						<CardTitle class="text-sm font-medium" title="显示当前磁盘可用空间、总容量和已用比例">
 							存储空间
 						</CardTitle>
 						<HardDriveIcon class="text-muted-foreground h-4 w-4" />
@@ -429,7 +426,7 @@
 								</div>
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -467,7 +464,7 @@
 											variant="outline"
 											onclick={() => {
 												loadDashboard();
-												loadLatestIngests();
+												loadIngests();
 											}}
 											class="h-8"
 											title="刷新首页数据"
@@ -553,21 +550,18 @@
 								</div>
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
 			</div>
 
-			<!-- 第二行：最近入库 + 下载任务状态 -->
+			<!-- 第二行：入库概览 + 下载任务状态 -->
 			<div class="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
 				<Card class="max-w-full overflow-hidden lg:col-span-2">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示近七日新增视频统计和最近入库记录"
-						>
-							最近入库
+						<CardTitle class="text-sm font-medium" title="显示近七日新增视频统计">
+							入库概览
 						</CardTitle>
 						<VideoIcon class="text-muted-foreground h-4 w-4" />
 					</CardHeader>
@@ -615,31 +609,42 @@
 							</div>
 						{/if}
 
-						<!-- 最新入库按钮 -->
-						<div class="mt-6 flex items-center justify-between">
-							<span class="text-sm font-medium">最新入库</span>
-							<Button
-								size="sm"
-								variant="outline"
-								onclick={() => {
-									loadLatestIngests();
-									showIngestSheet = true;
-								}}
-								class="h-8"
-								title="查看最新入库记录"
-							>
-								<VideoIcon class="mr-2 h-4 w-4" />
-								查看详情
-							</Button>
+						<div class="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+							<span class="text-sm font-medium">入库记录</span>
+							<div class="flex flex-wrap gap-2">
+								<Button
+									size="sm"
+									variant="outline"
+									onclick={() => {
+										loadIngests('latest');
+										showIngestSheet = true;
+									}}
+									class="h-8"
+									title="查看最新入库记录"
+								>
+									<VideoIcon class="mr-2 h-4 w-4" />
+									最新入库
+								</Button>
+								<Button
+									size="sm"
+									variant="outline"
+									onclick={() => {
+										loadIngests('recent');
+										showIngestSheet = true;
+									}}
+									class="h-8"
+									title="查看最近处理记录"
+								>
+									<ClockIcon class="mr-2 h-4 w-4" />
+									最近处理
+								</Button>
+							</div>
 						</div>
 					</CardContent>
 				</Card>
 				<Card class="max-w-full md:col-span-1">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示下载与扫描任务的运行状态和控制入口"
-						>
+						<CardTitle class="text-sm font-medium" title="显示下载与扫描任务的运行状态和控制入口">
 							下载任务状态
 						</CardTitle>
 						<CloudDownloadIcon class="text-muted-foreground h-4 w-4" />
@@ -734,7 +739,7 @@
 								{/if}
 							</div>
 						{:else}
-							<div class="text-muted-foreground text-sm">加载中...</div>
+							<Loading size="sm" align="start" textClass="text-sm" />
 						{/if}
 					</CardContent>
 				</Card>
@@ -745,10 +750,7 @@
 				<!-- 内存使用情况 -->
 				<Card class="overflow-hidden">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示系统总内存、已用内存和进程内存变化"
-						>
+						<CardTitle class="text-sm font-medium" title="显示系统总内存、已用内存和进程内存变化">
 							内存使用情况
 						</CardTitle>
 						<MemoryStickIcon class="text-muted-foreground h-4 w-4" />
@@ -823,10 +825,7 @@
 
 				<Card class="overflow-hidden">
 					<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
-						<CardTitle
-							class="text-sm font-medium"
-							title="显示当前 CPU 使用率和最近一段时间的变化"
-						>
+						<CardTitle class="text-sm font-medium" title="显示当前 CPU 使用率和最近一段时间的变化">
 							CPU 使用情况
 						</CardTitle>
 						<CpuIcon class="text-muted-foreground h-4 w-4" />
@@ -900,16 +899,16 @@
 		{/if}
 	</div>
 
-	<!-- 最新入库 Dialog 弹窗 -->
+	<!-- 入库记录 Dialog 弹窗 -->
 	<Dialog.Root bind:open={showIngestSheet}>
 		<Dialog.Content class="sm:max-w-2xl">
 			<Dialog.Header>
 				<Dialog.Title class="flex items-center justify-between pr-8">
-					<span>最新入库</span>
+					<span>{getIngestViewTitle()}</span>
 					<Button
 						size="sm"
 						variant="ghost"
-						onclick={() => loadLatestIngests()}
+						onclick={() => loadIngests()}
 						disabled={loadingLatestIngests}
 						class="h-7 px-2"
 						title="刷新"
@@ -924,7 +923,7 @@
 			</Dialog.Header>
 			<div class="mt-2 max-h-[60vh] space-y-2 overflow-auto">
 				{#if latestIngests.length === 0}
-					<div class="text-muted-foreground py-8 text-center text-sm">暂无入库记录</div>
+					<EmptyState title={`暂无${getIngestViewTitle()}记录`} class="border-0 bg-transparent py-8" />
 				{:else}
 					{#each latestIngests as item (item.video_id)}
 						<div class="hover:bg-muted/30 rounded-lg border p-3 transition-colors">
@@ -960,6 +959,11 @@
 										<div class="flex items-center gap-1 text-xs text-amber-600">
 											<Trash2Icon class="h-4 w-4" />
 											<span class="hidden sm:inline">已删除</span>
+										</div>
+									{:else if item.status === 'pending'}
+										<div class="flex items-center gap-1 text-xs text-sky-600">
+											<ClockIcon class="h-4 w-4" />
+											<span class="hidden sm:inline">处理中</span>
 										</div>
 									{:else}
 										<div class="flex items-center gap-1 text-xs text-rose-600">

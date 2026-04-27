@@ -6,7 +6,14 @@ export interface ApiResponse<T> {
 }
 
 // 排序字段枚举
-export type SortBy = 'id' | 'name' | 'upper_name' | 'created_at' | 'pubtime' | 'is_charge_video' | 'file_size';
+export type SortBy =
+	| 'id'
+	| 'name'
+	| 'upper_name'
+	| 'created_at'
+	| 'pubtime'
+	| 'is_charge_video'
+	| 'file_size';
 
 // 排序顺序枚举
 export type SortOrder = 'asc' | 'desc';
@@ -127,10 +134,19 @@ export interface PageInfo {
 	danmaku_last_write_count: number;
 }
 
+// 视频所属来源标签
+export interface VideoSourceTag {
+	source_id: number;
+	source_type: string;
+	source_type_label: string;
+	source_name: string;
+}
+
 // 单个视频响应类型
 export interface VideoResponse {
 	video: VideoInfo;
 	pages: PageInfo[];
+	source?: VideoSourceTag | null;
 }
 
 // 重置视频响应类型
@@ -269,6 +285,7 @@ export interface ConfigResponse {
 	time_format: string;
 	interval: number;
 	nfo_time_type: string;
+	nfo_include_genre: boolean;
 	parallel_download_enabled: boolean;
 	parallel_download_threads: number;
 	parallel_download_use_aria2: boolean;
@@ -407,6 +424,7 @@ export interface UpdateConfigRequest {
 	time_format?: string;
 	interval?: number;
 	nfo_time_type?: string;
+	nfo_include_genre?: boolean;
 	parallel_download_enabled?: boolean;
 	parallel_download_threads?: number;
 	parallel_download_use_aria2?: boolean;
@@ -699,6 +717,7 @@ export interface QueueStatusResponse {
 	delete_queue: QueueInfo;
 	video_delete_queue: QueueInfo;
 	add_queue: QueueInfo;
+	danmaku_queue: QueueInfo;
 	config_queue: ConfigQueueInfo;
 }
 
@@ -1020,7 +1039,7 @@ export interface LatestIngestItem {
 	path: string;
 	ingested_at: string;
 	download_speed_bps: number | null;
-	status: 'success' | 'failed' | 'deleted';
+	status: 'success' | 'failed' | 'deleted' | 'pending';
 	series_name: string | null; // 番剧系列名称（从share_copy的《》中提取）
 }
 

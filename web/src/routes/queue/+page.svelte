@@ -24,14 +24,16 @@
 	import type { QueueStatusResponse } from '$lib/types';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { runRequest } from '$lib/utils/request.js';
-	import { formatTimestamp } from '$lib/utils/timezone';
+	import { formatTimestampOrFallback } from '$lib/utils/timezone';
+	import { buildAuthenticatedStreamUrl } from '$lib/utils/live-stream';
+	import { createManagedEventSource } from '$lib/utils/live-event-source';
+	import SectionHeader from '$lib/components/section-header.svelte';
 	import { toast } from 'svelte-sonner';
 
 	let queueStatus: QueueStatusResponse | null = null;
 	let loading = true;
 	let error: string | null = null;
-	let queueEventSource: EventSource | null = null;
-	let currentQueueStreamUrl: string | null = null;
+	const queueStream = createManagedEventSource();
 	let cancellingTaskIds: Record<string, boolean> = {};
 
 	// 设置面包屑
@@ -58,46 +60,28 @@
 	}
 
 	function buildQueueStreamUrl(): string | null {
-		const token = localStorage.getItem('auth_token');
-		if (!token) return null;
-
-		const params = new URLSearchParams();
-		params.append('token', token);
-		return `/api/queue/live?${params.toString()}`;
+		return buildAuthenticatedStreamUrl('/api/queue/live');
 	}
 
 	function stopQueueStream() {
-		if (queueEventSource) {
-			queueEventSource.close();
-			queueEventSource = null;
-		}
-		currentQueueStreamUrl = null;
+		queueStream.stop();
 	}
 
 	function startQueueStream() {
-		const streamUrl = buildQueueStreamUrl();
-		if (!streamUrl) return;
-		if (queueEventSource && currentQueueStreamUrl === streamUrl) return;
-
-		stopQueueStream();
-		currentQueueStreamUrl = streamUrl;
-
-		const eventSource = new EventSource(streamUrl);
-		queueEventSource = eventSource;
-
-		eventSource.addEventListener('queue', (event) => {
-			try {
-				queueStatus = JSON.parse((event as MessageEvent).data) as QueueStatusResponse;
-				error = null;
-				loading = false;
-			} catch (err) {
-				console.error('解析任务队列实时更新失败:', err);
+		queueStream.start({
+			url: buildQueueStreamUrl(),
+			handlers: {
+				queue: (event) => {
+					try {
+						queueStatus = JSON.parse(event.data) as QueueStatusResponse;
+						error = null;
+						loading = false;
+					} catch (err) {
+						console.error('解析任务队列实时更新失败:', err);
+					}
+				}
 			}
 		});
-
-		eventSource.onerror = () => {
-			if (queueEventSource !== eventSource) return;
-		};
 	}
 
 	// 手动刷新
@@ -109,11 +93,7 @@
 
 	// 格式化时间
 	function formatTime(timeString: string): string {
-		const formatted = formatTimestamp(timeString, 'Asia/Shanghai', 'time');
-		if (formatted === '无效时间' || formatted === '格式化失败') {
-			return '无效时间';
-		}
-		return formatted;
+		return formatTimestampOrFallback(timeString, 'Asia/Shanghai', 'time', '无效时间');
 	}
 
 	// 获取任务类型的显示名称
@@ -123,7 +103,8 @@
 			delete_video: '删除视频',
 			add_video_source: '添加视频源',
 			update_config: '更新配置',
-			reload_config: '重载配置'
+			reload_config: '重载配置',
+			refresh_danmaku: '刷新弹幕'
 		};
 		return typeMap[taskType] || taskType;
 	}
@@ -136,7 +117,8 @@
 			delete_video: Trash2,
 			add_video_source: Plus,
 			update_config: Settings,
-			reload_config: RefreshCw
+			reload_config: RefreshCw,
+			refresh_danmaku: RefreshCw
 		};
 		return iconMap[taskType] || ListTodo;
 	}
@@ -194,16 +176,21 @@
 </script>
 
 <div class="container mx-auto px-4">
-	<div class="mb-6 flex items-center justify-between">
-		<div>
-			<h1 class="text-3xl font-bold">任务队列</h1>
-			<p class="text-muted-foreground mt-2">查看和管理系统任务队列状态</p>
-		</div>
-		<Button variant="outline" size="sm" onclick={handleRefresh} disabled={loading}>
-			<RefreshCw class="mr-2 h-4 w-4 {loading ? 'animate-spin' : ''}" />
-			刷新
-		</Button>
-	</div>
+	<SectionHeader
+		as="h1"
+		title="任务队列"
+		description="查看和管理系统任务队列状态"
+		titleClass="text-3xl font-bold"
+		descriptionClass="text-muted-foreground mt-2"
+		class="mb-6"
+	>
+		{#snippet actions()}
+			<Button variant="outline" size="sm" onclick={handleRefresh} disabled={loading}>
+				<RefreshCw class="mr-2 h-4 w-4 {loading ? 'animate-spin' : ''}" />
+				刷新
+			</Button>
+		{/snippet}
+	</SectionHeader>
 
 	{#if error}
 		<Card class="border-destructive">
@@ -331,6 +318,29 @@
 							{getQueueStatusText(
 								queueStatus.config_queue.is_processing,
 								queueStatus.config_queue.update_length + queueStatus.config_queue.reload_length > 0
+							)}
+						</Badge>
+					</div>
+				</CardContent>
+			</Card>
+
+			<Card>
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+					<CardTitle class="text-sm font-medium">弹幕刷新队列</CardTitle>
+					<RefreshCw class="text-muted-foreground h-4 w-4" />
+				</CardHeader>
+				<CardContent>
+					<div class="text-2xl font-bold">{queueStatus.danmaku_queue.length}</div>
+					<div class="flex items-center gap-2">
+						<Badge
+							variant={getQueueStatusVariant(
+								queueStatus.danmaku_queue.is_processing,
+								queueStatus.danmaku_queue.length > 0
+							)}
+						>
+							{getQueueStatusText(
+								queueStatus.danmaku_queue.is_processing,
+								queueStatus.danmaku_queue.length > 0
 							)}
 						</Badge>
 					</div>
@@ -474,6 +484,60 @@
 						{:else}
 							<div class="space-y-3">
 								{#each queueStatus.add_queue.tasks as task (task.task_id)}
+									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
+										<div class="flex items-center gap-3">
+											<svelte:component
+												this={getTaskTypeIcon(task.task_type)}
+												class="text-muted-foreground h-4 w-4"
+											/>
+											<div>
+												<p class="text-sm font-medium">{getTaskTypeName(task.task_type)}</p>
+												<p class="text-muted-foreground text-xs">ID: {task.task_id}</p>
+											</div>
+										</div>
+										<div class="flex items-center gap-2">
+											<p class="text-muted-foreground text-xs">{formatTime(task.created_at)}</p>
+											<Button
+												variant="outline"
+												size="sm"
+												class="h-7 px-2 text-xs"
+												data-glossary-term="取消任务"
+												disabled={isCancelling(task.task_id)}
+												onclick={() => handleCancelTask(task.task_id)}
+											>
+												<X class="mr-1 h-3.5 w-3.5" />
+												{isCancelling(task.task_id) ? '取消中' : '取消'}
+											</Button>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</CardContent>
+				</Card>
+
+				<Card>
+					<CardHeader>
+						<CardTitle class="flex items-center gap-2">
+							<RefreshCw class="h-5 w-5" />
+							弹幕刷新队列
+							{#if queueStatus.danmaku_queue.is_processing}
+								<Badge variant="destructive">处理中</Badge>
+							{/if}
+						</CardTitle>
+						<CardDescription>等待处理的手动弹幕刷新任务</CardDescription>
+					</CardHeader>
+					<CardContent>
+						{#if queueStatus.danmaku_queue.tasks.length === 0}
+							<div class="text-muted-foreground flex items-center justify-center py-8">
+								<div class="text-center">
+									<CheckCircle class="mx-auto mb-3 h-12 w-12 opacity-50" />
+									<p>队列为空</p>
+								</div>
+							</div>
+						{:else}
+							<div class="space-y-3">
+								{#each queueStatus.danmaku_queue.tasks as task (task.task_id)}
 									<div class="bg-muted/50 flex items-center justify-between rounded-lg p-3">
 										<div class="flex items-center gap-3">
 											<svelte:component

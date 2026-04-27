@@ -16,7 +16,7 @@
 		ToQuery
 	} from '$lib/stores/filter';
 	import { buildVideosRequest } from '$lib/utils/videos.js';
-	import type { ApiError, UpdateVideoStatusRequest, VideoResponse } from '$lib/types';
+	import type { ApiError, UpdateVideoStatusRequest, VideoResponse, VideoSourceTag } from '$lib/types';
 	import { IsMobile } from '$lib/hooks/is-mobile.svelte.js';
 	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
@@ -28,6 +28,7 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { get } from 'svelte/store';
+	import Loading from '$lib/components/ui/Loading.svelte';
 
 	let videoData: VideoResponse | null = null;
 	let loading = false;
@@ -94,9 +95,7 @@
 
 	function parseBeijingTimestamp(value?: string | null): Date | null {
 		if (!value) return null;
-		const match = value.match(
-			/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/
-		);
+		const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/);
 		if (!match) return null;
 		const [, year, month, day, hour, minute, second] = match;
 		return new Date(
@@ -133,7 +132,9 @@
 	function getDanmakuSyncTitle(generation: number, lastSyncedAt?: string | null) {
 		const stageLabel = getDanmakuStageLabel(generation);
 		const description = getDanmakuStageDescription(generation);
-		return lastSyncedAt ? `当前阶段：${stageLabel}。${description}` : `当前阶段：${stageLabel}。${description}`;
+		return lastSyncedAt
+			? `当前阶段：${stageLabel}。${description}`
+			: `当前阶段：${stageLabel}。${description}`;
 	}
 
 	function getDanmakuLastSyncedTitle(value?: string | null) {
@@ -165,6 +166,28 @@
 		return `${Math.max(0, count ?? 0)} 条`;
 	}
 
+	function normalizeDisplayPath(path?: string | null) {
+		return path ? path.replace(/\\/g, '/') : '';
+	}
+
+	function getVideoMetaBadges(author?: string | null, source?: VideoSourceTag | null) {
+		const badges: Array<{ label: string; value: string; title?: string }> = [];
+		if (author) {
+			badges.push({
+				label: 'UP',
+				value: author,
+				title: `当前 UP：${author}`
+			});
+		}
+		if (source) {
+			badges.push({
+				label: '视频源',
+				value: `${source.source_type_label} · ${source.source_name}`,
+				title: `该视频来自 ${source.source_type_label}：${source.source_name}`
+			});
+		}
+		return badges;
+	}
 	function isRefreshingPage(pageId: number) {
 		return refreshingPageIds.has(pageId);
 	}
@@ -618,9 +641,7 @@
 </svelte:head>
 
 {#if loading}
-	<div class="flex items-center justify-center py-12">
-		<div class="text-muted-foreground">加载中...</div>
-	</div>
+	<Loading />
 {:else if error}
 	<div class="flex items-center justify-center py-12">
 		<div class="space-y-2 text-center">
@@ -637,7 +658,7 @@
 	<!-- 视频信息区域 -->
 	<section>
 		<div class="mb-4 flex {isMobile ? 'flex-col gap-3' : 'items-center justify-between'}">
-			<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center gap-2">
 				{#if totalCount > 1}
 					<Button
 						size="sm"
@@ -724,6 +745,8 @@
 				}}
 				mode="detail"
 				showActions={true}
+				customSubtitle=""
+				customMetaBadges={getVideoMetaBadges(videoData.video.upper_name, videoData.source)}
 				progressHeight="h-3"
 				gap="gap-2"
 				taskNames={videoTaskNames}
@@ -731,17 +754,35 @@
 		</div>
 
 		<!-- 下载路径信息 -->
-		{#if videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path}
+		{#if videoData.video.path || (videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path)}
 			<div class="bg-muted mb-4 rounded-lg border {isMobile ? 'p-3' : 'p-4'}">
 				<h3 class="text-foreground mb-2 text-sm font-medium">📁 下载保存路径</h3>
-				<div
-					class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
-						? 'text-xs'
-						: 'text-sm'} break-all"
-				>
-					{videoData.pages[0].path}
+				<div class="space-y-3">
+					{#if videoData.video.path}
+						<div class="space-y-1">
+							<div class="text-muted-foreground text-xs">保存路径</div>
+							<div
+								class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
+									? 'text-xs'
+									: 'text-sm'} break-all"
+							>
+								{normalizeDisplayPath(videoData.video.path)}
+							</div>
+						</div>
+					{/if}
+					{#if videoData.pages && videoData.pages.length > 0 && videoData.pages[0].path}
+						<div class="space-y-1">
+							<div class="text-muted-foreground text-xs">视频文件路径</div>
+							<div
+								class="bg-card rounded border {isMobile ? 'px-2 py-2' : 'px-3 py-2'} font-mono {isMobile
+									? 'text-xs'
+									: 'text-sm'} break-all"
+							>
+								{normalizeDisplayPath(videoData.pages[0].path)}
+							</div>
+						</div>
+					{/if}
 				</div>
-				<p class="text-muted-foreground mt-1 text-xs">视频文件将保存到此路径下</p>
 			</div>
 		{/if}
 	</section>
@@ -762,9 +803,7 @@
 						onclick={handleRefreshVideoDanmaku}
 						disabled={refreshingVideoDanmaku}
 					>
-						<RefreshCwIcon
-							class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}"
-						/>
+						<RefreshCwIcon class="mr-2 h-4 w-4 {refreshingVideoDanmaku ? 'animate-spin' : ''}" />
 						{refreshingVideoDanmaku ? '刷新中...' : '刷新全部弹幕'}
 					</Button>
 				</div>
@@ -803,7 +842,9 @@
 									showProgress={true}
 								/>
 
-								<div class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+								<div
+									class="bg-muted/40 flex items-center justify-between gap-3 rounded-lg border px-3 py-2"
+								>
 									<div class="min-w-0">
 										<div
 											class="text-muted-foreground cursor-help text-xs"
@@ -815,7 +856,7 @@
 											弹幕同步
 										</div>
 										<div
-											class="truncate cursor-help text-sm font-medium"
+											class="cursor-help truncate text-sm font-medium"
 											title={getDanmakuSyncTitle(
 												pageInfo.danmaku_sync_generation,
 												pageInfo.danmaku_last_synced_at

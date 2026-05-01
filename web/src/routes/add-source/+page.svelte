@@ -5135,9 +5135,6 @@
 	</div>
 {/if}
 
-{#if debugPanelEnabled}
-{/if}
-
 <style>
 	/* 限制描述文字的行数 */
 	.line-clamp-2 {
